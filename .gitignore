@@ -1,0 +1,5 @@
+.env
+node_modules/
+samples/
+extracts/
+.DS_Store
