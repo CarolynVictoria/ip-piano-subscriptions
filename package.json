@@ -1,15 +1,17 @@
 {
-  "name": "ip-piano-subscriptions",
-  "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "dependencies": {
-    "mssql": "^12.7.2"
-  }
+	"name": "ip-piano-subscriptions",
+	"version": "1.0.0",
+	"main": "index.js",
+	"scripts": {
+		"test": "echo \"Error: no test specified\" && exit 1",
+		"extract:terms": "node --env-file=.env scripts/extract-terms.mjs",
+		"extract:reference": "node --env-file=.env scripts/extract-reference-data.mjs"
+	},
+	"keywords": [],
+	"author": "",
+	"license": "ISC",
+	"description": "",
+	"dependencies": {
+		"mssql": "^12.7.2"
+	}
 }
