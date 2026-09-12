@@ -1,4 +1,16 @@
 /* =========================================================
+   Drop existing tables so this script can be rerun
+   ========================================================= */
+
+drop table if exists dbo.contract_domain_users;
+drop table if exists dbo.contract_domains;
+drop table if exists dbo.contract_users;
+drop table if exists dbo.contracts;
+drop table if exists dbo.licensees;
+drop table if exists dbo.extract_runs;
+
+
+/* =========================================================
    Piano.io site-license extraction tables
 
    Design rules:
@@ -224,65 +236,3 @@ create table dbo.contract_domain_users (
         constraint df_domain_users_extracted_at
         default sysutcdatetime()
 );
-
-
-/* =========================================================
-   Basic non-unique indexes
-
-   These improve normal reporting and joins without imposing
-   assumptions about uniqueness in the Piano source.
-   ========================================================= */
-
-create index ix_licensees_licensee_id
-    on dbo.licensees (licensee_id);
-
-create index ix_contracts_licensee_id
-    on dbo.contracts (licensee_id);
-
-create index ix_contracts_contract_id
-    on dbo.contracts (contract_id);
-
-create index ix_contracts_contract_type
-    on dbo.contracts (contract_type);
-
-create index ix_contract_users_contract_id
-    on dbo.contract_users (contract_id);
-
-create index ix_contract_users_contract_user_id
-    on dbo.contract_users (contract_user_id);
-
-create index ix_contract_users_email
-    on dbo.contract_users (email);
-
-create index ix_contract_domains_contract_id
-    on dbo.contract_domains (contract_id);
-
-create index ix_contract_domains_domain_id
-    on dbo.contract_domains (contract_domain_id);
-
-create index ix_contract_domain_users_contract_id
-    on dbo.contract_domain_users (contract_id);
-
-create index ix_contract_domain_users_domain_id
-    on dbo.contract_domain_users (contract_domain_id);
-
-create index ix_contract_domain_users_contract_user_id
-    on dbo.contract_domain_users (contract_user_id);
-
-create index ix_contract_domain_users_email
-    on dbo.contract_domain_users (email);
-
-create index ix_licensees_extract_run
-    on dbo.licensees (extract_run_id);
-
-create index ix_contracts_extract_run
-    on dbo.contracts (extract_run_id);
-
-create index ix_contract_users_extract_run
-    on dbo.contract_users (extract_run_id);
-
-create index ix_contract_domains_extract_run
-    on dbo.contract_domains (extract_run_id);
-
-create index ix_contract_domain_users_extract_run
-    on dbo.contract_domain_users (extract_run_id);
