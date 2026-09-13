@@ -900,7 +900,7 @@ function assertCountsMatch(expected, actual) {
 async function main() {
 	const startedAt = new Date();
 
-	const runName = `run-${startedAt.toISOString().replace(/[:.]/g, '-')}`;
+	const runName = `run-site-licenses-${startedAt.toISOString().replace(/[:.]/g, '-')}`;
 
 	const runDir = path.join(EXTRACT_ROOT, runName);
 

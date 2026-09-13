@@ -1120,7 +1120,7 @@ async function main() {
 	const startedAt = new Date();
 	const runDir = path.resolve(
 		EXTRACT_ROOT,
-		`run-${timestampForPath(startedAt)}`,
+		`run-reference-data-${timestampForPath(startedAt)}`,
 	);
 
 	await fs.mkdir(runDir, { recursive: true });
