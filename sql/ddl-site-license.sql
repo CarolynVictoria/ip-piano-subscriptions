@@ -2,11 +2,11 @@
    Drop existing tables so this script can be rerun
    ========================================================= */
 
-drop table if exists dbo.contract_domain_users;
-drop table if exists dbo.contract_domains;
-drop table if exists dbo.contract_users;
-drop table if exists dbo.contracts;
-drop table if exists dbo.licensees;
+drop table if exists dbo.site_contract_domain_users;
+drop table if exists dbo.site_contract_domains;
+drop table if exists dbo.site_contract_users;
+drop table if exists dbo.site_contracts;
+drop table if exists dbo.site_licensees;
 drop table if exists dbo.extract_runs;
 
 
@@ -53,7 +53,7 @@ create table dbo.extract_runs (
    than being split into additional tables.
    --------------------------------------------------------- */
 
-create table dbo.licensees (
+create table dbo.site_licensees (
     row_id                bigint identity(1,1) not null
         constraint pk_licensees primary key,
 
@@ -86,7 +86,7 @@ create table dbo.licensees (
    create_date remains the original Piano epoch value.
    --------------------------------------------------------- */
 
-create table dbo.contracts (
+create table dbo.site_contracts (
     row_id                      bigint identity(1,1) not null
         constraint pk_contracts primary key,
 
@@ -134,7 +134,7 @@ create table dbo.contracts (
    intentionally repeated here rather than requiring joins.
    --------------------------------------------------------- */
 
-create table dbo.contract_users (
+create table dbo.site_contract_users (
     row_id             bigint identity(1,1) not null
         constraint pk_contract_users primary key,
 
@@ -168,7 +168,7 @@ create table dbo.contract_users (
    One database row per object in each domains[] array.
    --------------------------------------------------------- */
 
-create table dbo.contract_domains (
+create table dbo.site_contract_domains (
     row_id                       bigint identity(1,1) not null
         constraint pk_contract_domains primary key,
 
@@ -208,7 +208,7 @@ create table dbo.contract_domains (
    needs to be reconstructed later.
    --------------------------------------------------------- */
 
-create table dbo.contract_domain_users (
+create table dbo.site_contract_domain_users (
     row_id                  bigint identity(1,1) not null
         constraint pk_domain_users primary key,
 

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import sql from 'mssql';
 
 /* =========================================================
    Piano.io subscription extractor
@@ -16,7 +17,9 @@ import process from 'node:process';
    - Validate row counts and subscription_id uniqueness.
    - Detect common source changes while the live extract runs.
 
-   No SQL loading is performed by this script.
+   - Populate the current subscription SQL snapshot only after
+     the source extract passes its stability controls.
+   - Preserve the prior current SQL snapshot in previous_* tables.
    ========================================================= */
 
 /* =========================================================
@@ -29,6 +32,12 @@ const API_BASE_URL = (
 
 const AID = process.env.PIANO_AID;
 const API_TOKEN = process.env.PIANO_API_TOKEN;
+
+const SQL_SERVER = process.env.SQL_SERVER;
+const SQL_PORT = Number(process.env.SQL_PORT || 1433);
+const SQL_USER = process.env.SQL_USER;
+const SQL_PASSWORD = process.env.SQL_PASSWORD;
+const SQL_DATABASE = process.env.SQL_DATABASE;
 
 const EXTRACT_ROOT = process.env.EXTRACT_ROOT || './extracts';
 
@@ -51,12 +60,111 @@ const ENDPOINT = '/publisher/subscription/list';
 
 const RUN_NAME = 'piano-subscriptions';
 
+const SITE_LICENSE_TERM_TYPES = new Set([
+	'email_domain_contract',
+	'specific_email_addresses_contract',
+]);
+
+/* =========================================================
+   SQL table definitions
+
+   These column definitions match sql/ddl-subscriptions.sql.
+   row_id and extracted_at_utc are database-managed.
+   ========================================================= */
+
+const TABLE_SPECS = [
+	{
+		name: 'subscriptions',
+		columns: {
+			subscription_id: sql.VarChar(64),
+			auto_renew: sql.Bit,
+			next_bill_date: sql.BigInt,
+			payment_method: sql.NVarChar(500),
+			user_payment_info_id: sql.VarChar(64),
+			upi_ext_customer_id: sql.NVarChar(255),
+			upi_ext_customer_id_label: sql.NVarChar(255),
+			billing_plan: sql.NVarChar(1000),
+			end_date: sql.BigInt,
+			cancelable: sql.Bit,
+			cancelable_and_refundadle: sql.Bit,
+			psc_subscriber_number: sql.NVarChar(255),
+			conversion_result: sql.NVarChar(sql.MAX),
+			external_api_name: sql.NVarChar(255),
+			status: sql.VarChar(100),
+			status_name: sql.NVarChar(255),
+			status_name_in_reports: sql.NVarChar(255),
+			term_id: sql.VarChar(64),
+			resource_rid: sql.VarChar(64),
+			user_uid: sql.VarChar(64),
+			user_email: sql.NVarChar(320),
+			user_first_name: sql.NVarChar(255),
+			user_last_name: sql.NVarChar(255),
+			user_personal_name: sql.NVarChar(500),
+			user_image1: sql.NVarChar(2000),
+			user_create_date: sql.BigInt,
+			user_last_visit: sql.BigInt,
+			user_last_login: sql.BigInt,
+			user_display_name: sql.NVarChar(500),
+			start_date: sql.BigInt,
+			is_in_trial: sql.Bit,
+			trial_amount: sql.Decimal(19, 6),
+			trial_currency: sql.VarChar(16),
+			charge_count: sql.Int,
+			acquisition_type: sql.VarChar(100),
+			shared_account_limit: sql.Int,
+			can_manage_shared_subscription: sql.Bit,
+			subscription_json: sql.NVarChar(sql.MAX),
+		},
+	},
+	{
+		name: 'subscription_shared_accounts',
+		columns: {
+			subscription_id: sql.VarChar(64),
+			shared_account_number: sql.Int,
+			account_id: sql.VarChar(64),
+			user_id: sql.VarChar(64),
+			email: sql.NVarChar(320),
+			first_name: sql.NVarChar(255),
+			last_name: sql.NVarChar(255),
+			personal_name: sql.NVarChar(500),
+			redeemed: sql.BigInt,
+			active: sql.Bit,
+			shared_account_json: sql.NVarChar(sql.MAX),
+		},
+	},
+];
+
+const TABLE_SPEC_BY_NAME = new Map(
+	TABLE_SPECS.map((spec) => [spec.name, spec]),
+);
+
 /* =========================================================
    Configuration validation
    ========================================================= */
 
-if (!AID || !API_TOKEN) {
-	throw new Error('Missing PIANO_AID or PIANO_API_TOKEN in environment.');
+const missingEnv = [];
+
+for (const [name, value] of Object.entries({
+	PIANO_AID: AID,
+	PIANO_API_TOKEN: API_TOKEN,
+	SQL_SERVER,
+	SQL_USER,
+	SQL_PASSWORD,
+	SQL_DATABASE,
+})) {
+	if (!value) {
+		missingEnv.push(name);
+	}
+}
+
+if (missingEnv.length > 0) {
+	throw new Error(
+		`Missing required environment variable(s): ${missingEnv.join(', ')}`,
+	);
+}
+
+if (!Number.isInteger(SQL_PORT) || SQL_PORT <= 0) {
+	throw new Error(`SQL_PORT must be a positive integer. Received: ${SQL_PORT}`);
 }
 
 if (!Number.isInteger(PAGE_LIMIT) || PAGE_LIMIT <= 0) {
@@ -99,6 +207,14 @@ function paddedOffset(offset) {
 
 function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sqlValue(value) {
+	return value === undefined || value === null ? null : value;
+}
+
+function quoteSqlIdentifier(name) {
+	return `[${String(name).replaceAll(']', ']]')}]`;
 }
 
 function asFiniteNumber(value) {
@@ -365,6 +481,466 @@ function validatePage(body, expectedOffset) {
 }
 
 /* =========================================================
+   Transform subscription source objects into SQL rows
+
+   The subscription row preserves the complete source object as
+   subscription_json. Nested Term and Resource data are not
+   duplicated relationally; only term_id and resource_rid are
+   stored here.
+
+   subscription_shared_accounts is deliberately limited to
+   shared_accounts[] under payment subscriptions. Child users
+   under site-license contract term types are excluded because
+   those belong to the site-license contract tables.
+   ========================================================= */
+
+function buildSqlRowsForSubscriptions(subscriptions) {
+	const subscriptionRows = [];
+	const sharedAccountRows = [];
+
+	const excludedSiteLicenseSharedAccountsByTermType = new Map();
+
+	for (const subscription of subscriptions) {
+		const subscriptionId = sqlValue(subscription?.subscription_id);
+		const termType = sqlValue(subscription?.term?.type);
+
+		const sourceSharedAccounts = subscription?.shared_accounts;
+
+		if (
+			sourceSharedAccounts !== undefined &&
+			sourceSharedAccounts !== null &&
+			!Array.isArray(sourceSharedAccounts)
+		) {
+			throw new Error(
+				`Subscription ${subscriptionId ?? '(missing)'} has non-array shared_accounts.`,
+			);
+		}
+
+		subscriptionRows.push({
+			subscription_id: subscriptionId,
+			auto_renew: sqlValue(subscription?.auto_renew),
+			next_bill_date: sqlValue(subscription?.next_bill_date),
+			payment_method: sqlValue(subscription?.payment_method),
+			user_payment_info_id: sqlValue(subscription?.user_payment_info_id),
+			upi_ext_customer_id: sqlValue(subscription?.upi_ext_customer_id),
+			upi_ext_customer_id_label: sqlValue(
+				subscription?.upi_ext_customer_id_label,
+			),
+			billing_plan: sqlValue(subscription?.billing_plan),
+			end_date: sqlValue(subscription?.end_date),
+			cancelable: sqlValue(subscription?.cancelable),
+			cancelable_and_refundadle: sqlValue(
+				subscription?.cancelable_and_refundadle,
+			),
+			psc_subscriber_number: sqlValue(subscription?.psc_subscriber_number),
+			conversion_result: sqlValue(subscription?.conversion_result),
+			external_api_name: sqlValue(subscription?.external_api_name),
+			status: sqlValue(subscription?.status),
+			status_name: sqlValue(subscription?.status_name),
+			status_name_in_reports: sqlValue(subscription?.status_name_in_reports),
+			term_id: sqlValue(subscription?.term?.term_id),
+			resource_rid: sqlValue(subscription?.resource?.rid),
+			user_uid: sqlValue(subscription?.user?.uid),
+			user_email: sqlValue(subscription?.user?.email),
+			user_first_name: sqlValue(subscription?.user?.first_name),
+			user_last_name: sqlValue(subscription?.user?.last_name),
+			user_personal_name: sqlValue(subscription?.user?.personal_name),
+			user_image1: sqlValue(subscription?.user?.image1),
+			user_create_date: sqlValue(subscription?.user?.create_date),
+			user_last_visit: sqlValue(subscription?.user?.last_visit),
+			user_last_login: sqlValue(subscription?.user?.last_login),
+			user_display_name: sqlValue(subscription?.user?.display_name),
+			start_date: sqlValue(subscription?.start_date),
+			is_in_trial: sqlValue(subscription?.is_in_trial),
+			trial_amount: sqlValue(subscription?.trial_amount),
+			trial_currency: sqlValue(subscription?.trial_currency),
+			charge_count: sqlValue(subscription?.charge_count),
+			acquisition_type: sqlValue(subscription?.acquisition_type),
+			shared_account_limit: sqlValue(subscription?.shared_account_limit),
+			can_manage_shared_subscription: sqlValue(
+				subscription?.can_manage_shared_subscription,
+			),
+			subscription_json: JSON.stringify(subscription),
+		});
+
+		const sharedAccounts = sourceSharedAccounts || [];
+
+		if (sharedAccounts.length === 0) {
+			continue;
+		}
+
+		if (termType === 'payment') {
+			for (let index = 0; index < sharedAccounts.length; index += 1) {
+				const account = sharedAccounts[index];
+
+				sharedAccountRows.push({
+					subscription_id: subscriptionId,
+					shared_account_number: index + 1,
+					account_id: sqlValue(account?.account_id),
+					user_id: sqlValue(account?.user_id),
+					email: sqlValue(account?.email),
+					first_name: sqlValue(account?.first_name),
+					last_name: sqlValue(account?.last_name),
+					personal_name: sqlValue(account?.personal_name),
+					redeemed: sqlValue(account?.redeemed),
+					active: sqlValue(account?.active),
+					shared_account_json: JSON.stringify(account),
+				});
+			}
+
+			continue;
+		}
+
+		if (SITE_LICENSE_TERM_TYPES.has(termType)) {
+			excludedSiteLicenseSharedAccountsByTermType.set(
+				termType,
+				(excludedSiteLicenseSharedAccountsByTermType.get(termType) || 0) +
+					sharedAccounts.length,
+			);
+
+			continue;
+		}
+
+		throw new Error(
+			`Subscription ${subscriptionId ?? '(missing)'} has ${sharedAccounts.length} shared account(s) under unrecognized term type ${String(termType)}. Refusing to classify those child accounts automatically.`,
+		);
+	}
+
+	return {
+		subscriptions: subscriptionRows,
+		subscription_shared_accounts: sharedAccountRows,
+		excluded_site_license_shared_accounts_by_term_type: mapToSortedObject(
+			excludedSiteLicenseSharedAccountsByTermType,
+		),
+	};
+}
+
+/* =========================================================
+   SQL connection and extract_runs tracking
+   ========================================================= */
+
+function sqlConfig() {
+	return {
+		server: SQL_SERVER,
+		port: SQL_PORT,
+		user: SQL_USER,
+		password: SQL_PASSWORD,
+		database: SQL_DATABASE,
+		options: {
+			encrypt: false,
+			trustServerCertificate: true,
+		},
+		pool: {
+			max: 5,
+			min: 0,
+			idleTimeoutMillis: 30000,
+		},
+		requestTimeout: 120000,
+	};
+}
+
+async function createExtractRun(pool) {
+	const result = await pool
+		.request()
+		.input('run_name', sql.NVarChar(255), RUN_NAME)
+		.input(
+			'notes',
+			sql.NVarChar(sql.MAX),
+			'Piano subscription extraction and SQL snapshot load',
+		).query(`
+			insert into dbo.extract_runs (
+				run_name,
+				status,
+				notes
+			)
+			output inserted.extract_run_id
+			values (
+				@run_name,
+				'RUNNING',
+				@notes
+			);
+		`);
+
+	return result.recordset[0].extract_run_id;
+}
+
+async function markExtractRunComplete(pool, extractRunId, notes) {
+	await pool
+		.request()
+		.input('extract_run_id', sql.BigInt, extractRunId)
+		.input('notes', sql.NVarChar(sql.MAX), notes).query(`
+			update dbo.extract_runs
+			set
+				completed_at_utc = sysutcdatetime(),
+				status = 'COMPLETE',
+				notes = @notes
+			where extract_run_id = @extract_run_id;
+		`);
+}
+
+async function markExtractRunFailed(pool, extractRunId, notes) {
+	await pool
+		.request()
+		.input('extract_run_id', sql.BigInt, extractRunId)
+		.input('notes', sql.NVarChar(sql.MAX), notes).query(`
+			update dbo.extract_runs
+			set
+				completed_at_utc = sysutcdatetime(),
+				status = 'FAILED',
+				notes = @notes
+			where extract_run_id = @extract_run_id;
+		`);
+}
+
+/* =========================================================
+   SQL snapshot helpers
+   ========================================================= */
+
+async function getTableCount(transaction, tableName) {
+	const result = await new sql.Request(transaction).query(`
+		select count_big(*) as row_count
+		from dbo.${quoteSqlIdentifier(tableName)};
+	`);
+
+	return Number(result.recordset[0].row_count);
+}
+
+async function getCounts(transaction, previous = false) {
+	const counts = {};
+
+	for (const spec of TABLE_SPECS) {
+		const tableName = previous ? `previous_${spec.name}` : spec.name;
+
+		counts[spec.name] = await getTableCount(transaction, tableName);
+	}
+
+	return counts;
+}
+
+async function truncateTables(transaction, previous = false) {
+	for (const spec of [...TABLE_SPECS].reverse()) {
+		const tableName = previous ? `previous_${spec.name}` : spec.name;
+
+		await new sql.Request(transaction).query(`
+			truncate table dbo.${quoteSqlIdentifier(tableName)};
+		`);
+	}
+}
+
+async function copyCurrentToPrevious(transaction) {
+	const beforeCounts = await getCounts(transaction, false);
+
+	await truncateTables(transaction, true);
+
+	for (const spec of TABLE_SPECS) {
+		const sourceTable = spec.name;
+		const targetTable = `previous_${spec.name}`;
+
+		const columns = [
+			'extract_run_id',
+			...Object.keys(spec.columns),
+			'extracted_at_utc',
+		];
+
+		const columnList = columns.map(quoteSqlIdentifier).join(',\n\t\t\t');
+
+		await new sql.Request(transaction).query(`
+			insert into dbo.${quoteSqlIdentifier(targetTable)} (
+				${columnList}
+			)
+			select
+				${columnList}
+			from dbo.${quoteSqlIdentifier(sourceTable)};
+		`);
+	}
+
+	const previousCounts = await getCounts(transaction, true);
+
+	for (const spec of TABLE_SPECS) {
+		if (previousCounts[spec.name] !== beforeCounts[spec.name]) {
+			throw new Error(
+				`Previous snapshot count mismatch for ${spec.name}: current-before=${beforeCounts[spec.name]}, previous=${previousCounts[spec.name]}`,
+			);
+		}
+	}
+
+	return beforeCounts;
+}
+
+async function insertRows(transaction, extractRunId, tableName, rows) {
+	if (rows.length === 0) {
+		return;
+	}
+
+	const spec = TABLE_SPEC_BY_NAME.get(tableName);
+
+	if (!spec) {
+		throw new Error(`No SQL table specification for ${tableName}`);
+	}
+
+	const dataColumns = Object.keys(spec.columns);
+	const insertColumns = ['extract_run_id', ...dataColumns];
+
+	const insertSql = `
+		insert into dbo.${quoteSqlIdentifier(tableName)} (
+			${insertColumns.map(quoteSqlIdentifier).join(',\n\t\t\t')}
+		)
+		values (
+			${insertColumns.map((name) => `@${name}`).join(',\n\t\t\t')}
+		);
+	`;
+
+	for (const row of rows) {
+		const request = new sql.Request(transaction).input(
+			'extract_run_id',
+			sql.BigInt,
+			extractRunId,
+		);
+
+		for (const column of dataColumns) {
+			request.input(column, spec.columns[column], sqlValue(row[column]));
+		}
+
+		await request.query(insertSql);
+	}
+}
+
+async function loadCurrentTablesFromPages(
+	transaction,
+	extractRunId,
+	runDir,
+	pageIndex,
+) {
+	const loadedCounts = {
+		subscriptions: 0,
+		subscription_shared_accounts: 0,
+	};
+
+	const excludedSiteLicenseSharedAccountsByTermType = new Map();
+
+	for (let index = 0; index < pageIndex.length; index += 1) {
+		const pageEntry = pageIndex[index];
+		const pagePath = path.join(runDir, pageEntry.file);
+		const body = JSON.parse(await fs.readFile(pagePath, 'utf8'));
+
+		if (!Array.isArray(body?.subscriptions)) {
+			throw new Error(`Saved subscription page is invalid: ${pageEntry.file}`);
+		}
+
+		if (body.subscriptions.length !== pageEntry.count) {
+			throw new Error(
+				`Saved subscription page count changed for ${pageEntry.file}: expected=${pageEntry.count}, actual=${body.subscriptions.length}`,
+			);
+		}
+
+		const rows = buildSqlRowsForSubscriptions(body.subscriptions);
+
+		await insertRows(
+			transaction,
+			extractRunId,
+			'subscriptions',
+			rows.subscriptions,
+		);
+
+		await insertRows(
+			transaction,
+			extractRunId,
+			'subscription_shared_accounts',
+			rows.subscription_shared_accounts,
+		);
+
+		loadedCounts.subscriptions += rows.subscriptions.length;
+		loadedCounts.subscription_shared_accounts +=
+			rows.subscription_shared_accounts.length;
+
+		for (const [termType, count] of Object.entries(
+			rows.excluded_site_license_shared_accounts_by_term_type,
+		)) {
+			excludedSiteLicenseSharedAccountsByTermType.set(
+				termType,
+				(excludedSiteLicenseSharedAccountsByTermType.get(termType) || 0) +
+					count,
+			);
+		}
+
+		if ((index + 1) % 25 === 0 || index + 1 === pageIndex.length) {
+			console.log(
+				`SQL load progress: ${index + 1}/${pageIndex.length} saved page(s); ` +
+					`subscriptions=${loadedCounts.subscriptions}, ` +
+					`shared_accounts=${loadedCounts.subscription_shared_accounts}`,
+			);
+		}
+	}
+
+	return {
+		counts: loadedCounts,
+		excluded_site_license_shared_accounts_by_term_type: mapToSortedObject(
+			excludedSiteLicenseSharedAccountsByTermType,
+		),
+	};
+}
+
+async function validateSqlLoad(transaction, extractRunId, expectedCounts) {
+	const actualCounts = await getCounts(transaction, false);
+
+	for (const spec of TABLE_SPECS) {
+		if (actualCounts[spec.name] !== expectedCounts[spec.name]) {
+			throw new Error(
+				`SQL count mismatch for ${spec.name}: expected=${expectedCounts[spec.name]}, actual=${actualCounts[spec.name]}`,
+			);
+		}
+	}
+
+	const result = await new sql.Request(transaction).input(
+		'extract_run_id',
+		sql.BigInt,
+		extractRunId,
+	).query(`
+			select
+				(
+					select count_big(*)
+					from dbo.subscription_shared_accounts sa
+					left join dbo.subscriptions s
+						on s.subscription_id = sa.subscription_id
+					where s.row_id is null
+				) as orphan_shared_account_count,
+
+				(
+					select count_big(*)
+					from dbo.subscriptions
+					where extract_run_id <> @extract_run_id
+						or extract_run_id is null
+				) as wrong_subscription_extract_run_count,
+
+				(
+					select count_big(*)
+					from dbo.subscription_shared_accounts
+					where extract_run_id <> @extract_run_id
+						or extract_run_id is null
+				) as wrong_shared_account_extract_run_count;
+		`);
+
+	const rawRelationshipCounts = result.recordset[0];
+	const relationshipCounts = Object.fromEntries(
+		Object.entries(rawRelationshipCounts).map(([key, value]) => [
+			key,
+			Number(value),
+		]),
+	);
+
+	for (const [name, value] of Object.entries(relationshipCounts)) {
+		if (value !== 0) {
+			throw new Error(`SQL subscription validation failed: ${name}=${value}`);
+		}
+	}
+
+	return {
+		counts: actualCounts,
+		relationships: relationshipCounts,
+	};
+}
+
+/* =========================================================
    Main extraction
    ========================================================= */
 
@@ -417,7 +993,19 @@ async function main() {
 
 	const pageIndex = [];
 
+	let pool = null;
+	let extractRunId = null;
+	let transaction = null;
+	let transactionStarted = false;
+	let sqlLoad = null;
+	let previousSnapshotSourceCounts = null;
+	let sqlValidation = null;
+
 	try {
+		pool = await sql.connect(sqlConfig());
+		extractRunId = await createExtractRun(pool);
+
+		console.log(`SQL extract_run_id=${extractRunId}`);
 		console.log('Piano subscription extraction');
 
 		console.log(`Endpoint: ${ENDPOINT}`);
@@ -709,10 +1297,53 @@ async function main() {
 			'utf8',
 		);
 
+		/*
+		 * Subscription snapshot tables are modified only after the
+		 * complete API extract has passed all source-count,
+		 * uniqueness, and stability checks.
+		 */
+		transaction = new sql.Transaction(pool);
+		await transaction.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
+		transactionStarted = true;
+
+		console.log('\nCreating previous subscription snapshot...');
+		previousSnapshotSourceCounts = await copyCurrentToPrevious(transaction);
+
+		console.log('Truncating current subscription tables...');
+		await truncateTables(transaction, false);
+
+		console.log('Loading new subscription snapshot...');
+		sqlLoad = await loadCurrentTablesFromPages(
+			transaction,
+			extractRunId,
+			runDir,
+			pageIndex,
+		);
+
+		if (sqlLoad.counts.subscriptions !== extractedCount) {
+			throw new Error(
+				'SQL source-row count mismatch before validation: ' +
+					`extracted=${extractedCount}, ` +
+					`sql_source_rows=${sqlLoad.counts.subscriptions}.`,
+			);
+		}
+
+		console.log('Validating SQL subscription snapshot...');
+		sqlValidation = await validateSqlLoad(
+			transaction,
+			extractRunId,
+			sqlLoad.counts,
+		);
+
+		await transaction.commit();
+		transactionStarted = false;
+
 		const completedAt = new Date();
 
 		const summary = {
 			extract_name: RUN_NAME,
+
+			extract_run_id: extractRunId,
 
 			endpoint: ENDPOINT,
 
@@ -752,11 +1383,22 @@ async function main() {
 
 			acquisition_type_counts: mapToSortedObject(acquisitionTypeCounts),
 
+			sql_counts: sqlLoad.counts,
+
+			previous_snapshot_source_counts: previousSnapshotSourceCounts,
+
+			excluded_site_license_shared_accounts_by_term_type:
+				sqlLoad.excluded_site_license_shared_accounts_by_term_type,
+
+			sql_validation: sqlValidation,
+
 			complete: true,
 		};
 
 		const manifest = {
 			extract_name: RUN_NAME,
+
+			extract_run_id: extractRunId,
 
 			generated_at_utc: completedAt.toISOString(),
 
@@ -772,6 +1414,8 @@ async function main() {
 			page_directory: 'pages',
 
 			page_file_count: pageCount,
+
+			counts: sqlLoad.counts,
 
 			complete: true,
 		};
@@ -789,6 +1433,15 @@ async function main() {
 				'utf8',
 			),
 		]);
+
+		await markExtractRunComplete(
+			pool,
+			extractRunId,
+			JSON.stringify({
+				counts: sqlLoad.counts,
+				output: runDir,
+			}),
+		);
 
 		console.log('\nSubscription extraction complete.');
 
@@ -808,8 +1461,22 @@ async function main() {
 			}
 		}
 
+		if (transactionStarted && transaction) {
+			try {
+				await transaction.rollback();
+				transactionStarted = false;
+				console.error('SQL transaction rolled back.');
+			} catch (rollbackError) {
+				console.error(
+					`SQL rollback failed: ${rollbackError?.message || rollbackError}`,
+				);
+			}
+		}
+
 		const failure = {
 			extract_name: RUN_NAME,
+
+			extract_run_id: extractRunId,
 
 			endpoint: ENDPOINT,
 
@@ -836,6 +1503,12 @@ async function main() {
 			duplicate_subscription_id_count: duplicateIds.size,
 
 			missing_subscription_id_count: missingIdCount,
+
+			previous_snapshot_source_counts: previousSnapshotSourceCounts,
+
+			sql_load: sqlLoad,
+
+			sql_validation: sqlValidation,
 
 			complete: false,
 
@@ -866,6 +1539,20 @@ async function main() {
 			 */
 		}
 
+		if (pool && extractRunId !== null) {
+			try {
+				await markExtractRunFailed(
+					pool,
+					extractRunId,
+					error?.message || String(error),
+				);
+			} catch (runUpdateError) {
+				console.error(
+					`Could not mark extract_run_id=${extractRunId} FAILED: ${runUpdateError?.message || runUpdateError}`,
+				);
+			}
+		}
+
 		console.error('\nFatal subscription extraction error:');
 
 		console.error(error?.stack || error);
@@ -877,6 +1564,10 @@ async function main() {
 		console.error(`Incomplete run output: ${runDir}`);
 
 		process.exitCode = 1;
+	} finally {
+		if (pool) {
+			await pool.close();
+		}
 	}
 }
 

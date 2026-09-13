@@ -305,13 +305,13 @@ async function markRunFailed(pool, extractRunId, error) {
 
 async function backupCurrentTables(transaction) {
 	await transaction.request().batch(`
-		TRUNCATE TABLE dbo.previous_contract_domain_users;
-		TRUNCATE TABLE dbo.previous_contract_domains;
-		TRUNCATE TABLE dbo.previous_contract_users;
-		TRUNCATE TABLE dbo.previous_contracts;
-		TRUNCATE TABLE dbo.previous_licensees;
+		TRUNCATE TABLE dbo.previous_site_contract_domain_users;
+		TRUNCATE TABLE dbo.previous_site_contract_domains;
+		TRUNCATE TABLE dbo.previous_site_contract_users;
+		TRUNCATE TABLE dbo.previous_site_contracts;
+		TRUNCATE TABLE dbo.previous_site_licensees;
 
-		INSERT INTO dbo.previous_licensees (
+		INSERT INTO dbo.previous_site_licensees (
 			extract_run_id,
 			aid,
 			licensee_id,
@@ -332,9 +332,9 @@ async function backupCurrentTables(transaction) {
 			representatives_json,
 			managers_json,
 			extracted_at_utc
-		FROM dbo.licensees;
+		FROM dbo.site_licensees;
 
-		INSERT INTO dbo.previous_contracts (
+		INSERT INTO dbo.previous_site_contracts (
 			extract_run_id,
 			licensee_id,
 			licensee_name,
@@ -373,9 +373,9 @@ async function backupCurrentTables(transaction) {
 			contract_periods_json,
 			contract_conversions_count,
 			extracted_at_utc
-		FROM dbo.contracts;
+		FROM dbo.site_contracts;
 
-		INSERT INTO dbo.previous_contract_users (
+		INSERT INTO dbo.previous_site_contract_users (
 			extract_run_id,
 			licensee_id,
 			licensee_name,
@@ -402,9 +402,9 @@ async function backupCurrentTables(transaction) {
 			first_name,
 			last_name,
 			extracted_at_utc
-		FROM dbo.contract_users;
+		FROM dbo.site_contract_users;
 
-		INSERT INTO dbo.previous_contract_domains (
+		INSERT INTO dbo.previous_site_contract_domains (
 			extract_run_id,
 			licensee_id,
 			licensee_name,
@@ -431,9 +431,9 @@ async function backupCurrentTables(transaction) {
 			contract_users_count,
 			active_contract_users_count,
 			extracted_at_utc
-		FROM dbo.contract_domains;
+		FROM dbo.site_contract_domains;
 
-		INSERT INTO dbo.previous_contract_domain_users (
+		INSERT INTO dbo.previous_site_contract_domain_users (
 			extract_run_id,
 			licensee_id,
 			licensee_name,
@@ -466,17 +466,17 @@ async function backupCurrentTables(transaction) {
 			first_name,
 			last_name,
 			extracted_at_utc
-		FROM dbo.contract_domain_users;
+		FROM dbo.site_contract_domain_users;
 	`);
 }
 
 async function truncateCurrentTables(transaction) {
 	await transaction.request().batch(`
-		TRUNCATE TABLE dbo.contract_domain_users;
-		TRUNCATE TABLE dbo.contract_domains;
-		TRUNCATE TABLE dbo.contract_users;
-		TRUNCATE TABLE dbo.contracts;
-		TRUNCATE TABLE dbo.licensees;
+		TRUNCATE TABLE dbo.site_contract_domain_users;
+		TRUNCATE TABLE dbo.site_contract_domains;
+		TRUNCATE TABLE dbo.site_contract_users;
+		TRUNCATE TABLE dbo.site_contracts;
+		TRUNCATE TABLE dbo.site_licensees;
 	`);
 }
 
@@ -504,7 +504,7 @@ async function insertLicensees(transaction, extractRunId, licensees) {
 				sql.NVarChar(sql.MAX),
 				jsonOrNull(licensee.managers),
 			).query(`
-				INSERT INTO dbo.licensees (
+				INSERT INTO dbo.site_licensees (
 					extract_run_id,
 					aid,
 					licensee_id,
@@ -590,7 +590,7 @@ async function insertContracts(transaction, extractRunId, contractGroups) {
 					sql.Int,
 					valueOrNull(contract.contract_conversions_count),
 				).query(`
-					INSERT INTO dbo.contracts (
+					INSERT INTO dbo.site_contracts (
 						extract_run_id,
 						licensee_id,
 						licensee_name,
@@ -666,7 +666,7 @@ async function insertContractUsers(transaction, extractRunId, groups) {
 				.input('first_name', sql.NVarChar(255), valueOrNull(user.first_name))
 				.input('last_name', sql.NVarChar(255), valueOrNull(user.last_name))
 				.query(`
-					INSERT INTO dbo.contract_users (
+					INSERT INTO dbo.site_contract_users (
 						extract_run_id,
 						licensee_id,
 						licensee_name,
@@ -741,7 +741,7 @@ async function insertContractDomains(transaction, extractRunId, groups) {
 					sql.Int,
 					valueOrNull(domain.active_contract_users_count),
 				).query(`
-					INSERT INTO dbo.contract_domains (
+					INSERT INTO dbo.site_contract_domains (
 						extract_run_id,
 						licensee_id,
 						licensee_name,
@@ -816,7 +816,7 @@ async function insertContractDomainUsers(transaction, extractRunId, groups) {
 				.input('first_name', sql.NVarChar(255), valueOrNull(user.first_name))
 				.input('last_name', sql.NVarChar(255), valueOrNull(user.last_name))
 				.query(`
-					INSERT INTO dbo.contract_domain_users (
+					INSERT INTO dbo.site_contract_domain_users (
 						extract_run_id,
 						licensee_id,
 						licensee_name,
@@ -856,27 +856,27 @@ async function insertContractDomainUsers(transaction, extractRunId, groups) {
 async function getSqlCounts(transaction) {
 	const result = await transaction.request().query(`
 			SELECT 'licensees' AS table_name, COUNT(*) AS row_count
-			FROM dbo.licensees
+			FROM dbo.site_licensees
 
 			UNION ALL
 
 			SELECT 'contracts', COUNT(*)
-			FROM dbo.contracts
+			FROM dbo.site_contracts
 
 			UNION ALL
 
 			SELECT 'contract_users', COUNT(*)
-			FROM dbo.contract_users
+			FROM dbo.site_contract_users
 
 			UNION ALL
 
 			SELECT 'contract_domains', COUNT(*)
-			FROM dbo.contract_domains
+			FROM dbo.site_contract_domains
 
 			UNION ALL
 
 			SELECT 'contract_domain_users', COUNT(*)
-			FROM dbo.contract_domain_users;
+			FROM dbo.site_contract_domain_users;
 		`);
 
 	return Object.fromEntries(

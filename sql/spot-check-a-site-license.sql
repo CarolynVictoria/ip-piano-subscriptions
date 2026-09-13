@@ -26,15 +26,15 @@ SELECT
         END
     ) AS redeemed_user_count
 
-FROM dbo.contracts c
+FROM dbo.site_contracts c
 
-LEFT JOIN dbo.contract_domains d
+LEFT JOIN dbo.site_contract_domains d
     ON d.contract_id = c.contract_id
 
-LEFT JOIN dbo.contract_users cu
+LEFT JOIN dbo.site_contract_users cu
     ON cu.contract_id = c.contract_id
 
-LEFT JOIN dbo.contract_domain_users du
+LEFT JOIN dbo.site_contract_domain_users du
     ON du.contract_id = c.contract_id
 
 WHERE c.licensee_name = 'Harvard Library'

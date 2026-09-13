@@ -6,7 +6,7 @@ WITH direct_users AS (
         SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) AS pending_users,
         SUM(CASE WHEN status = 'REVOKED' THEN 1 ELSE 0 END) AS revoked_users,
         SUM(CASE WHEN status = 'INVALID_EMAIL' THEN 1 ELSE 0 END) AS invalid_email_users
-    FROM dbo.contract_users
+    FROM dbo.site_contract_users
     GROUP BY contract_id
 ),
 
@@ -18,7 +18,7 @@ domain_users AS (
         SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) AS pending_users,
         SUM(CASE WHEN status = 'REVOKED' THEN 1 ELSE 0 END) AS revoked_users,
         SUM(CASE WHEN status = 'INVALID_EMAIL' THEN 1 ELSE 0 END) AS invalid_email_users
-    FROM dbo.contract_domain_users
+    FROM    dbo.site_contract_domain_users
     GROUP BY contract_id
 ),
 
@@ -26,7 +26,7 @@ domains AS (
     SELECT
         contract_id,
         COUNT(*) AS domain_count
-    FROM dbo.contract_domains
+    FROM dbo.site_contract_domains
     GROUP BY contract_id
 )
 
@@ -55,7 +55,7 @@ SELECT
     COALESCE(du.invalid_email_users, 0)
         + COALESCE(dmu.invalid_email_users, 0) AS invalid_email_users
 
-FROM dbo.contracts c
+FROM dbo.site_contracts c
 
 LEFT JOIN direct_users du
     ON du.contract_id = c.contract_id
