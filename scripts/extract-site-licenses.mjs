@@ -21,6 +21,8 @@ const PAGE_SIZE = 50;
 const MAX_PAGES = 10000;
 const MAX_RETRIES = 3;
 
+const SQL_BULK_BATCH_SIZE = Number(process.env.SQL_BULK_BATCH_SIZE || 1000);
+
 const ENDPOINTS = {
 	licensees: '/publisher/licensing/licensee/list',
 
@@ -46,6 +48,13 @@ for (const name of REQUIRED_ENV) {
 	if (!process.env[name]) {
 		throw new Error(`Missing ${name} in environment.`);
 	}
+}
+
+if (!Number.isInteger(SQL_BULK_BATCH_SIZE) || SQL_BULK_BATCH_SIZE <= 0) {
+	throw new Error(
+		'SQL_BULK_BATCH_SIZE must be a positive integer. ' +
+			`Received: ${SQL_BULK_BATCH_SIZE}`,
+	);
 }
 
 const sqlConfig = {
@@ -485,377 +494,293 @@ async function truncateCurrentTables(transaction) {
 	`);
 }
 
-async function insertLicensees(transaction, extractRunId, licensees) {
-	for (const licensee of licensees) {
-		await transaction
-			.request()
-			.input('extract_run_id', sql.BigInt, extractRunId)
-			.input('aid', sql.VarChar(64), valueOrNull(licensee.aid))
-			.input('licensee_id', sql.VarChar(64), valueOrNull(licensee.licensee_id))
-			.input('name', sql.NVarChar(500), valueOrNull(licensee.name))
-			.input(
-				'description',
-				sql.NVarChar(sql.MAX),
-				valueOrNull(licensee.description),
-			)
-			.input('logo_url', sql.NVarChar(2000), valueOrNull(licensee.logo_url))
-			.input(
-				'representatives_json',
-				sql.NVarChar(sql.MAX),
-				jsonOrNull(licensee.representatives),
-			)
-			.input(
-				'managers_json',
-				sql.NVarChar(sql.MAX),
-				jsonOrNull(licensee.managers),
-			).query(`
-				INSERT INTO dbo.site_licensees (
-					extract_run_id,
-					aid,
-					licensee_id,
-					name,
-					description,
-					logo_url,
-					representatives_json,
-					managers_json
-				)
-				VALUES (
-					@extract_run_id,
-					@aid,
-					@licensee_id,
-					@name,
-					@description,
-					@logo_url,
-					@representatives_json,
-					@managers_json
-				);
-			`);
+const SQL_TABLE_SPECS = {
+	site_licensees: {
+		columns: {
+			aid: sql.VarChar(64),
+			licensee_id: sql.VarChar(64),
+			name: sql.NVarChar(500),
+			description: sql.NVarChar(sql.MAX),
+			logo_url: sql.NVarChar(2000),
+			representatives_json: sql.NVarChar(sql.MAX),
+			managers_json: sql.NVarChar(sql.MAX),
+		},
+	},
+
+	site_contracts: {
+		columns: {
+			licensee_id: sql.VarChar(64),
+			licensee_name: sql.NVarChar(500),
+			contract_id: sql.VarChar(64),
+			aid: sql.VarChar(64),
+			name: sql.NVarChar(500),
+			description: sql.NVarChar(sql.MAX),
+			create_date: sql.BigInt,
+			landing_page_url: sql.NVarChar(2000),
+			seats_number: sql.Int,
+			is_hard_seats_limit_type: sql.Bit,
+			rid: sql.VarChar(64),
+			schedule_id: sql.VarChar(64),
+			contract_is_active: sql.Bit,
+			contract_type: sql.VarChar(100),
+			contract_periods_json: sql.NVarChar(sql.MAX),
+			contract_conversions_count: sql.Int,
+		},
+	},
+
+	site_contract_users: {
+		columns: {
+			licensee_id: sql.VarChar(64),
+			licensee_name: sql.NVarChar(500),
+			contract_id: sql.VarChar(64),
+			contract_name: sql.NVarChar(500),
+			contract_type: sql.VarChar(100),
+			contract_user_id: sql.VarChar(64),
+			status: sql.VarChar(50),
+			email: sql.NVarChar(320),
+			first_name: sql.NVarChar(255),
+			last_name: sql.NVarChar(255),
+		},
+	},
+
+	site_contract_domains: {
+		columns: {
+			licensee_id: sql.VarChar(64),
+			licensee_name: sql.NVarChar(500),
+			contract_id: sql.VarChar(64),
+			contract_name: sql.NVarChar(500),
+			contract_type: sql.VarChar(100),
+			contract_domain_id: sql.VarChar(64),
+			status: sql.VarChar(50),
+			contract_domain_value: sql.NVarChar(500),
+			contract_users_count: sql.Int,
+			active_contract_users_count: sql.Int,
+		},
+	},
+
+	site_contract_domain_users: {
+		columns: {
+			licensee_id: sql.VarChar(64),
+			licensee_name: sql.NVarChar(500),
+			contract_id: sql.VarChar(64),
+			contract_name: sql.NVarChar(500),
+			contract_type: sql.VarChar(100),
+			contract_domain_id: sql.VarChar(64),
+			contract_domain_value: sql.NVarChar(500),
+			domain_json: sql.NVarChar(sql.MAX),
+			contract_user_id: sql.VarChar(64),
+			status: sql.VarChar(50),
+			email: sql.NVarChar(320),
+			first_name: sql.NVarChar(255),
+			last_name: sql.NVarChar(255),
+		},
+	},
+};
+
+async function bulkInsertRows(transaction, extractRunId, tableName, rows) {
+	if (rows.length === 0) {
+		return;
 	}
+
+	const spec = SQL_TABLE_SPECS[tableName];
+
+	if (!spec) {
+		throw new Error(`No SQL table specification for ${tableName}`);
+	}
+
+	const dataColumns = Object.keys(spec.columns);
+
+	/*
+	 * Use node-mssql's TDS bulk-load path rather than issuing one
+	 * INSERT request per row. row_id and extracted_at_utc are
+	 * intentionally omitted so SQL Server continues to generate
+	 * the IDENTITY value and apply the extracted_at_utc default.
+	 */
+	const table = new sql.Table(`dbo.${tableName}`);
+
+	table.create = false;
+
+	table.columns.add('extract_run_id', sql.BigInt, {
+		nullable: true,
+	});
+
+	for (const column of dataColumns) {
+		table.columns.add(column, spec.columns[column], {
+			nullable: true,
+		});
+	}
+
+	for (const row of rows) {
+		table.rows.add(
+			extractRunId,
+			...dataColumns.map((column) => valueOrNull(row[column])),
+		);
+	}
+
+	const request = new sql.Request(transaction);
+
+	await request.bulk(table, {
+		checkConstraints: true,
+		keepNulls: true,
+	});
+}
+
+async function bulkInsertBatches(transaction, extractRunId, tableName, rows) {
+	if (rows.length === 0) {
+		console.log(`SQL bulk load ${tableName}: 0 row(s).`);
+		return;
+	}
+
+	console.log(
+		`SQL bulk load ${tableName}: ${rows.length} row(s), ` +
+			`batch size ${SQL_BULK_BATCH_SIZE}.`,
+	);
+
+	let loaded = 0;
+
+	while (loaded < rows.length) {
+		const batch = rows.slice(loaded, loaded + SQL_BULK_BATCH_SIZE);
+
+		await bulkInsertRows(transaction, extractRunId, tableName, batch);
+
+		loaded += batch.length;
+	}
+}
+
+async function insertLicensees(transaction, extractRunId, licensees) {
+	const rows = licensees.map((licensee) => ({
+		aid: valueOrNull(licensee.aid),
+		licensee_id: valueOrNull(licensee.licensee_id),
+		name: valueOrNull(licensee.name),
+		description: valueOrNull(licensee.description),
+		logo_url: valueOrNull(licensee.logo_url),
+		representatives_json: jsonOrNull(licensee.representatives),
+		managers_json: jsonOrNull(licensee.managers),
+	}));
+
+	await bulkInsertBatches(transaction, extractRunId, 'site_licensees', rows);
 }
 
 async function insertContracts(transaction, extractRunId, contractGroups) {
+	const rows = [];
+
 	for (const group of contractGroups) {
 		for (const contract of group.contracts) {
-			await transaction
-				.request()
-				.input('extract_run_id', sql.BigInt, extractRunId)
-				.input('licensee_id', sql.VarChar(64), valueOrNull(group.licensee_id))
-				.input(
-					'licensee_name',
-					sql.NVarChar(500),
-					valueOrNull(group.licensee_name),
-				)
-				.input(
-					'contract_id',
-					sql.VarChar(64),
-					valueOrNull(contract.contract_id),
-				)
-				.input('aid', sql.VarChar(64), valueOrNull(contract.aid))
-				.input('name', sql.NVarChar(500), valueOrNull(contract.name))
-				.input(
-					'description',
-					sql.NVarChar(sql.MAX),
-					valueOrNull(contract.description),
-				)
-				.input('create_date', sql.BigInt, valueOrNull(contract.create_date))
-				.input(
-					'landing_page_url',
-					sql.NVarChar(2000),
-					valueOrNull(contract.landing_page_url),
-				)
-				.input('seats_number', sql.Int, valueOrNull(contract.seats_number))
-				.input(
-					'is_hard_seats_limit_type',
-					sql.Bit,
-					valueOrNull(contract.is_hard_seats_limit_type),
-				)
-				.input('rid', sql.VarChar(64), valueOrNull(contract.rid))
-				.input(
-					'schedule_id',
-					sql.VarChar(64),
-					valueOrNull(contract.schedule_id),
-				)
-				.input(
-					'contract_is_active',
-					sql.Bit,
-					valueOrNull(contract.contract_is_active),
-				)
-				.input(
-					'contract_type',
-					sql.VarChar(100),
-					valueOrNull(contract.contract_type),
-				)
-				.input(
-					'contract_periods_json',
-					sql.NVarChar(sql.MAX),
-					jsonOrNull(contract.contract_periods),
-				)
-				.input(
-					'contract_conversions_count',
-					sql.Int,
-					valueOrNull(contract.contract_conversions_count),
-				).query(`
-					INSERT INTO dbo.site_contracts (
-						extract_run_id,
-						licensee_id,
-						licensee_name,
-						contract_id,
-						aid,
-						name,
-						description,
-						create_date,
-						landing_page_url,
-						seats_number,
-						is_hard_seats_limit_type,
-						rid,
-						schedule_id,
-						contract_is_active,
-						contract_type,
-						contract_periods_json,
-						contract_conversions_count
-					)
-					VALUES (
-						@extract_run_id,
-						@licensee_id,
-						@licensee_name,
-						@contract_id,
-						@aid,
-						@name,
-						@description,
-						@create_date,
-						@landing_page_url,
-						@seats_number,
-						@is_hard_seats_limit_type,
-						@rid,
-						@schedule_id,
-						@contract_is_active,
-						@contract_type,
-						@contract_periods_json,
-						@contract_conversions_count
-					);
-				`);
+			rows.push({
+				licensee_id: valueOrNull(group.licensee_id),
+				licensee_name: valueOrNull(group.licensee_name),
+				contract_id: valueOrNull(contract.contract_id),
+				aid: valueOrNull(contract.aid),
+				name: valueOrNull(contract.name),
+				description: valueOrNull(contract.description),
+				create_date: valueOrNull(contract.create_date),
+				landing_page_url: valueOrNull(contract.landing_page_url),
+				seats_number: valueOrNull(contract.seats_number),
+				is_hard_seats_limit_type: valueOrNull(
+					contract.is_hard_seats_limit_type,
+				),
+				rid: valueOrNull(contract.rid),
+				schedule_id: valueOrNull(contract.schedule_id),
+				contract_is_active: valueOrNull(contract.contract_is_active),
+				contract_type: valueOrNull(contract.contract_type),
+				contract_periods_json: jsonOrNull(contract.contract_periods),
+				contract_conversions_count: valueOrNull(
+					contract.contract_conversions_count,
+				),
+			});
 		}
 	}
+
+	await bulkInsertBatches(transaction, extractRunId, 'site_contracts', rows);
 }
 
 async function insertContractUsers(transaction, extractRunId, groups) {
+	const rows = [];
+
 	for (const group of groups) {
 		for (const user of group.users) {
-			await transaction
-				.request()
-				.input('extract_run_id', sql.BigInt, extractRunId)
-				.input('licensee_id', sql.VarChar(64), valueOrNull(group.licensee_id))
-				.input(
-					'licensee_name',
-					sql.NVarChar(500),
-					valueOrNull(group.licensee_name),
-				)
-				.input('contract_id', sql.VarChar(64), valueOrNull(group.contract_id))
-				.input(
-					'contract_name',
-					sql.NVarChar(500),
-					valueOrNull(group.contract_name),
-				)
-				.input(
-					'contract_type',
-					sql.VarChar(100),
-					valueOrNull(group.contract_type),
-				)
-				.input(
-					'contract_user_id',
-					sql.VarChar(64),
-					valueOrNull(user.contract_user_id),
-				)
-				.input('status', sql.VarChar(50), valueOrNull(user.status))
-				.input('email', sql.NVarChar(320), valueOrNull(user.email))
-				.input('first_name', sql.NVarChar(255), valueOrNull(user.first_name))
-				.input('last_name', sql.NVarChar(255), valueOrNull(user.last_name))
-				.query(`
-					INSERT INTO dbo.site_contract_users (
-						extract_run_id,
-						licensee_id,
-						licensee_name,
-						contract_id,
-						contract_name,
-						contract_type,
-						contract_user_id,
-						status,
-						email,
-						first_name,
-						last_name
-					)
-					VALUES (
-						@extract_run_id,
-						@licensee_id,
-						@licensee_name,
-						@contract_id,
-						@contract_name,
-						@contract_type,
-						@contract_user_id,
-						@status,
-						@email,
-						@first_name,
-						@last_name
-					);
-				`);
+			rows.push({
+				licensee_id: valueOrNull(group.licensee_id),
+				licensee_name: valueOrNull(group.licensee_name),
+				contract_id: valueOrNull(group.contract_id),
+				contract_name: valueOrNull(group.contract_name),
+				contract_type: valueOrNull(group.contract_type),
+				contract_user_id: valueOrNull(user.contract_user_id),
+				status: valueOrNull(user.status),
+				email: valueOrNull(user.email),
+				first_name: valueOrNull(user.first_name),
+				last_name: valueOrNull(user.last_name),
+			});
 		}
 	}
+
+	await bulkInsertBatches(
+		transaction,
+		extractRunId,
+		'site_contract_users',
+		rows,
+	);
 }
 
 async function insertContractDomains(transaction, extractRunId, groups) {
+	const rows = [];
+
 	for (const group of groups) {
 		for (const domain of group.domains) {
-			await transaction
-				.request()
-				.input('extract_run_id', sql.BigInt, extractRunId)
-				.input('licensee_id', sql.VarChar(64), valueOrNull(group.licensee_id))
-				.input(
-					'licensee_name',
-					sql.NVarChar(500),
-					valueOrNull(group.licensee_name),
-				)
-				.input('contract_id', sql.VarChar(64), valueOrNull(group.contract_id))
-				.input(
-					'contract_name',
-					sql.NVarChar(500),
-					valueOrNull(group.contract_name),
-				)
-				.input(
-					'contract_type',
-					sql.VarChar(100),
-					valueOrNull(group.contract_type),
-				)
-				.input(
-					'contract_domain_id',
-					sql.VarChar(64),
-					valueOrNull(domain.contract_domain_id),
-				)
-				.input('status', sql.VarChar(50), valueOrNull(domain.status))
-				.input(
-					'contract_domain_value',
-					sql.NVarChar(500),
-					valueOrNull(domain.contract_domain_value),
-				)
-				.input(
-					'contract_users_count',
-					sql.Int,
-					valueOrNull(domain.contract_users_count),
-				)
-				.input(
-					'active_contract_users_count',
-					sql.Int,
-					valueOrNull(domain.active_contract_users_count),
-				).query(`
-					INSERT INTO dbo.site_contract_domains (
-						extract_run_id,
-						licensee_id,
-						licensee_name,
-						contract_id,
-						contract_name,
-						contract_type,
-						contract_domain_id,
-						status,
-						contract_domain_value,
-						contract_users_count,
-						active_contract_users_count
-					)
-					VALUES (
-						@extract_run_id,
-						@licensee_id,
-						@licensee_name,
-						@contract_id,
-						@contract_name,
-						@contract_type,
-						@contract_domain_id,
-						@status,
-						@contract_domain_value,
-						@contract_users_count,
-						@active_contract_users_count
-					);
-				`);
+			rows.push({
+				licensee_id: valueOrNull(group.licensee_id),
+				licensee_name: valueOrNull(group.licensee_name),
+				contract_id: valueOrNull(group.contract_id),
+				contract_name: valueOrNull(group.contract_name),
+				contract_type: valueOrNull(group.contract_type),
+				contract_domain_id: valueOrNull(domain.contract_domain_id),
+				status: valueOrNull(domain.status),
+				contract_domain_value: valueOrNull(domain.contract_domain_value),
+				contract_users_count: valueOrNull(domain.contract_users_count),
+				active_contract_users_count: valueOrNull(
+					domain.active_contract_users_count,
+				),
+			});
 		}
 	}
+
+	await bulkInsertBatches(
+		transaction,
+		extractRunId,
+		'site_contract_domains',
+		rows,
+	);
 }
 
 async function insertContractDomainUsers(transaction, extractRunId, groups) {
+	const rows = [];
+
 	for (const group of groups) {
 		for (const user of group.users) {
-			await transaction
-				.request()
-				.input('extract_run_id', sql.BigInt, extractRunId)
-				.input('licensee_id', sql.VarChar(64), valueOrNull(group.licensee_id))
-				.input(
-					'licensee_name',
-					sql.NVarChar(500),
-					valueOrNull(group.licensee_name),
-				)
-				.input('contract_id', sql.VarChar(64), valueOrNull(group.contract_id))
-				.input(
-					'contract_name',
-					sql.NVarChar(500),
-					valueOrNull(group.contract_name),
-				)
-				.input(
-					'contract_type',
-					sql.VarChar(100),
-					valueOrNull(group.contract_type),
-				)
-				.input(
-					'contract_domain_id',
-					sql.VarChar(64),
-					valueOrNull(group.contract_domain_id),
-				)
-				.input(
-					'contract_domain_value',
-					sql.NVarChar(500),
-					valueOrNull(group.contract_domain_value),
-				)
-				.input('domain_json', sql.NVarChar(sql.MAX), jsonOrNull(group.domain))
-				.input(
-					'contract_user_id',
-					sql.VarChar(64),
-					valueOrNull(user.contract_user_id),
-				)
-				.input('status', sql.VarChar(50), valueOrNull(user.status))
-				.input('email', sql.NVarChar(320), valueOrNull(user.email))
-				.input('first_name', sql.NVarChar(255), valueOrNull(user.first_name))
-				.input('last_name', sql.NVarChar(255), valueOrNull(user.last_name))
-				.query(`
-					INSERT INTO dbo.site_contract_domain_users (
-						extract_run_id,
-						licensee_id,
-						licensee_name,
-						contract_id,
-						contract_name,
-						contract_type,
-						contract_domain_id,
-						contract_domain_value,
-						domain_json,
-						contract_user_id,
-						status,
-						email,
-						first_name,
-						last_name
-					)
-					VALUES (
-						@extract_run_id,
-						@licensee_id,
-						@licensee_name,
-						@contract_id,
-						@contract_name,
-						@contract_type,
-						@contract_domain_id,
-						@contract_domain_value,
-						@domain_json,
-						@contract_user_id,
-						@status,
-						@email,
-						@first_name,
-						@last_name
-					);
-				`);
+			rows.push({
+				licensee_id: valueOrNull(group.licensee_id),
+				licensee_name: valueOrNull(group.licensee_name),
+				contract_id: valueOrNull(group.contract_id),
+				contract_name: valueOrNull(group.contract_name),
+				contract_type: valueOrNull(group.contract_type),
+				contract_domain_id: valueOrNull(group.contract_domain_id),
+				contract_domain_value: valueOrNull(group.contract_domain_value),
+				domain_json: jsonOrNull(group.domain),
+				contract_user_id: valueOrNull(user.contract_user_id),
+				status: valueOrNull(user.status),
+				email: valueOrNull(user.email),
+				first_name: valueOrNull(user.first_name),
+				last_name: valueOrNull(user.last_name),
+			});
 		}
 	}
+
+	await bulkInsertBatches(
+		transaction,
+		extractRunId,
+		'site_contract_domain_users',
+		rows,
+	);
 }
 
 async function getSqlCounts(transaction) {
@@ -1164,6 +1089,8 @@ async function main() {
 		);
 
 		console.log('API extraction files written successfully.');
+		console.log('');
+		console.log(`SQL bulk batch size: ${SQL_BULK_BATCH_SIZE}`);
 		console.log('');
 
 		/*

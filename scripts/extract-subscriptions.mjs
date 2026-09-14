@@ -56,6 +56,8 @@ const MAX_RETRIES = Number(process.env.MAX_RETRIES || 5);
 
 const REQUEST_DELAY_MS = Number(process.env.REQUEST_DELAY_MS || 0);
 
+const SQL_BULK_BATCH_SIZE = Number(process.env.SQL_BULK_BATCH_SIZE || 1000);
+
 const ENDPOINT = '/publisher/subscription/list';
 
 const RUN_NAME = 'piano-subscriptions';
@@ -188,6 +190,13 @@ if (!Number.isFinite(REQUEST_DELAY_MS) || REQUEST_DELAY_MS < 0) {
 	throw new Error(
 		'REQUEST_DELAY_MS must be a non-negative number. ' +
 			`Received: ${REQUEST_DELAY_MS}`,
+	);
+}
+
+if (!Number.isInteger(SQL_BULK_BATCH_SIZE) || SQL_BULK_BATCH_SIZE <= 0) {
+	throw new Error(
+		'SQL_BULK_BATCH_SIZE must be a positive integer. ' +
+			`Received: ${SQL_BULK_BATCH_SIZE}`,
 	);
 }
 
@@ -766,7 +775,7 @@ async function copyCurrentToPrevious(transaction) {
 	return beforeCounts;
 }
 
-async function insertRows(transaction, extractRunId, tableName, rows) {
+async function bulkInsertRows(transaction, extractRunId, tableName, rows) {
 	if (rows.length === 0) {
 		return;
 	}
@@ -778,30 +787,40 @@ async function insertRows(transaction, extractRunId, tableName, rows) {
 	}
 
 	const dataColumns = Object.keys(spec.columns);
-	const insertColumns = ['extract_run_id', ...dataColumns];
 
-	const insertSql = `
-		insert into dbo.${quoteSqlIdentifier(tableName)} (
-			${insertColumns.map(quoteSqlIdentifier).join(',\n\t\t\t')}
-		)
-		values (
-			${insertColumns.map((name) => `@${name}`).join(',\n\t\t\t')}
-		);
-	`;
+	/*
+	 * Use node-mssql's TDS bulk-load path rather than issuing one
+	 * INSERT request per row. row_id and extracted_at_utc are
+	 * intentionally omitted so SQL Server continues to generate
+	 * the IDENTITY value and apply the extracted_at_utc default.
+	 */
+	const table = new sql.Table(`dbo.${tableName}`);
+
+	table.create = false;
+
+	table.columns.add('extract_run_id', sql.BigInt, {
+		nullable: true,
+	});
+
+	for (const column of dataColumns) {
+		table.columns.add(column, spec.columns[column], {
+			nullable: true,
+		});
+	}
 
 	for (const row of rows) {
-		const request = new sql.Request(transaction).input(
-			'extract_run_id',
-			sql.BigInt,
+		table.rows.add(
 			extractRunId,
+			...dataColumns.map((column) => sqlValue(row[column])),
 		);
-
-		for (const column of dataColumns) {
-			request.input(column, spec.columns[column], sqlValue(row[column]));
-		}
-
-		await request.query(insertSql);
 	}
+
+	const request = new sql.Request(transaction);
+
+	await request.bulk(table, {
+		checkConstraints: true,
+		keepNulls: true,
+	});
 }
 
 async function loadCurrentTablesFromPages(
@@ -815,7 +834,29 @@ async function loadCurrentTablesFromPages(
 		subscription_shared_accounts: 0,
 	};
 
+	const pendingRows = {
+		subscriptions: [],
+		subscription_shared_accounts: [],
+	};
+
 	const excludedSiteLicenseSharedAccountsByTermType = new Map();
+
+	async function flushPendingRows(tableName, flushAll = false) {
+		const pending = pendingRows[tableName];
+
+		while (
+			pending.length >= SQL_BULK_BATCH_SIZE ||
+			(flushAll && pending.length > 0)
+		) {
+			const batchSize = Math.min(SQL_BULK_BATCH_SIZE, pending.length);
+
+			const batch = pending.splice(0, batchSize);
+
+			await bulkInsertRows(transaction, extractRunId, tableName, batch);
+
+			loadedCounts[tableName] += batch.length;
+		}
+	}
 
 	for (let index = 0; index < pageIndex.length; index += 1) {
 		const pageEntry = pageIndex[index];
@@ -834,23 +875,15 @@ async function loadCurrentTablesFromPages(
 
 		const rows = buildSqlRowsForSubscriptions(body.subscriptions);
 
-		await insertRows(
-			transaction,
-			extractRunId,
-			'subscriptions',
-			rows.subscriptions,
+		pendingRows.subscriptions.push(...rows.subscriptions);
+		pendingRows.subscription_shared_accounts.push(
+			...rows.subscription_shared_accounts,
 		);
 
-		await insertRows(
-			transaction,
-			extractRunId,
-			'subscription_shared_accounts',
-			rows.subscription_shared_accounts,
-		);
+		const isLastPage = index + 1 === pageIndex.length;
 
-		loadedCounts.subscriptions += rows.subscriptions.length;
-		loadedCounts.subscription_shared_accounts +=
-			rows.subscription_shared_accounts.length;
+		await flushPendingRows('subscriptions', isLastPage);
+		await flushPendingRows('subscription_shared_accounts', isLastPage);
 
 		for (const [termType, count] of Object.entries(
 			rows.excluded_site_license_shared_accounts_by_term_type,
@@ -1010,6 +1043,8 @@ async function main() {
 		console.log(`Endpoint: ${ENDPOINT}`);
 
 		console.log(`Page limit: ${PAGE_LIMIT}`);
+
+		console.log(`SQL bulk batch size: ${SQL_BULK_BATCH_SIZE}`);
 
 		console.log(`Output: ${runDir}`);
 
@@ -1356,6 +1391,8 @@ async function main() {
 
 			page_limit: PAGE_LIMIT,
 
+			sql_bulk_batch_size: SQL_BULK_BATCH_SIZE,
+
 			api_request_count: requestCount,
 
 			page_count: pageCount,
@@ -1486,6 +1523,8 @@ async function main() {
 			aid: AID,
 
 			page_limit: PAGE_LIMIT,
+
+			sql_bulk_batch_size: SQL_BULK_BATCH_SIZE,
 
 			api_request_count: requestCount,
 
