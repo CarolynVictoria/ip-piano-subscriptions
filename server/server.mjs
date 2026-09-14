@@ -1,14 +1,38 @@
+import process from 'node:process';
+
 import express from 'express';
 
 import { closePool, getPool } from './db.mjs';
 
-const PORT = Number(process.env.PORT || 3001);
+import subscriptionsRouter from './routes/subscriptions.mjs';
 
 const app = express();
 
-app.use(express.json());
+const PORT = Number(process.env.PORT || 3001);
 
-app.get('/api/status', async (request, response) => {
+if (!Number.isInteger(PORT) || PORT <= 0) {
+	throw new Error(
+		`PORT must be a positive integer. Received: ${process.env.PORT}`,
+	);
+}
+
+/* =========================================================
+   Express configuration
+   ========================================================= */
+
+app.disable('x-powered-by');
+
+app.use(
+	express.json({
+		limit: '100kb',
+	}),
+);
+
+/* =========================================================
+   API status
+   ========================================================= */
+
+app.get('/api/status', async (_req, res) => {
 	try {
 		const pool = await getPool();
 
@@ -18,38 +42,90 @@ app.get('/api/status', async (request, response) => {
 				SYSDATETIMEOFFSET() AS database_time;
 		`);
 
-		response.json({
+		const row = result.recordset[0];
+
+		return res.json({
 			ok: true,
-			database: result.recordset[0].database_name,
-			databaseTime: result.recordset[0].database_time,
+			database: row.database_name,
+			databaseTime: row.database_time,
 		});
 	} catch (error) {
-		console.error('Database status check failed:', error);
+		console.error('GET /api/status failed:', error);
 
-		response.status(500).json({
+		return res.status(500).json({
 			ok: false,
-			error: 'Database connection failed.',
+			error: 'Database status check failed.',
 		});
 	}
 });
+
+/* =========================================================
+   Subscription API
+   ========================================================= */
+
+app.use('/api/subscriptions', subscriptionsRouter);
+
+/* =========================================================
+   API error handler
+   ========================================================= */
+
+app.use((error, req, res, _next) => {
+	console.error(`${req.method} ${req.originalUrl} failed:`, error);
+
+	if (res.headersSent) {
+		return;
+	}
+
+	res.status(500).json({
+		ok: false,
+		error: 'Internal server error.',
+	});
+});
+
+/* =========================================================
+   Server startup
+   ========================================================= */
 
 const server = app.listen(PORT, () => {
 	console.log(`API server listening on http://localhost:${PORT}`);
 });
 
-async function shutdown(signal) {
-	console.log(`Received ${signal}. Shutting down.`);
+/* =========================================================
+   Graceful shutdown
+   ========================================================= */
 
-	server.close(async () => {
+let shuttingDown = false;
+
+async function shutdown(signal) {
+	if (shuttingDown) {
+		return;
+	}
+
+	shuttingDown = true;
+
+	console.log(`Received ${signal}; shutting down.`);
+
+	server.close(async (serverError) => {
+		let exitCode = 0;
+
+		if (serverError) {
+			console.error('HTTP server shutdown failed:', serverError);
+
+			exitCode = 1;
+		}
+
 		try {
 			await closePool();
-			process.exit(0);
 		} catch (error) {
-			console.error('Error while shutting down:', error);
-			process.exit(1);
+			console.error('SQL pool shutdown failed:', error);
+
+			exitCode = 1;
 		}
+
+		process.exit(exitCode);
 	});
 }
 
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
+
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
