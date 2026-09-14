@@ -853,8 +853,13 @@ function sqlConfig() {
 		password: SQL_PASSWORD,
 		database: SQL_DATABASE,
 		options: {
-			encrypt: false,
-			trustServerCertificate: true,
+			encrypt:
+				String(process.env.SQL_ENCRYPT || 'false').toLowerCase() === 'true',
+
+			trustServerCertificate:
+				String(
+					process.env.SQL_TRUST_SERVER_CERTIFICATE || 'true',
+				).toLowerCase() === 'true',
 		},
 		pool: {
 			max: 5,

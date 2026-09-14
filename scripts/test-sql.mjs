@@ -4,7 +4,7 @@ const required = ['SQL_SERVER', 'SQL_USER', 'SQL_PASSWORD', 'SQL_DATABASE'];
 
 for (const name of required) {
 	if (!process.env[name]) {
-		throw new Error(`Missing ${name} in .env`);
+		throw new Error(`Missing ${name} in environment.`);
 	}
 }
 
@@ -16,8 +16,13 @@ const config = {
 	database: process.env.SQL_DATABASE,
 
 	options: {
-		encrypt: false,
-		trustServerCertificate: true,
+		encrypt:
+			String(process.env.SQL_ENCRYPT || 'false').toLowerCase() === 'true',
+
+		trustServerCertificate:
+			String(
+				process.env.SQL_TRUST_SERVER_CERTIFICATE || 'true',
+			).toLowerCase() === 'true',
 	},
 };
 
@@ -36,17 +41,43 @@ try {
 		FROM sys.tables
 		WHERE name IN (
 			'extract_runs',
-			'licensees',
-			'contracts',
-			'contract_users',
-			'contract_domains',
-			'contract_domain_users'
+
+			'resources',
+			'terms',
+			'term_billing_plan_rows',
+			'term_change_options',
+			'term_change_option_show_options',
+
+			'site_licensees',
+			'site_contracts',
+			'site_contract_users',
+			'site_contract_domains',
+			'site_contract_domain_users',
+
+			'subscriptions',
+			'subscription_shared_accounts',
+
+			'previous_resources',
+			'previous_terms',
+			'previous_term_billing_plan_rows',
+			'previous_term_change_options',
+			'previous_term_change_option_show_options',
+
+			'previous_site_licensees',
+			'previous_site_contracts',
+			'previous_site_contract_users',
+			'previous_site_contract_domains',
+			'previous_site_contract_domain_users',
+
+			'previous_subscriptions',
+			'previous_subscription_shared_accounts'
 		)
 		ORDER BY name;
 	`);
 
 	console.log('SQL Server connection successful.');
 	console.log('');
+
 	console.log('Connection:');
 	console.table(result.recordsets[0]);
 
