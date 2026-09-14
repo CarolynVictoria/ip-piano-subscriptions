@@ -10,7 +10,8 @@ import sql from 'mssql';
    - GET /publisher/subscription/list
 
    Purpose:
-   - Extract the complete unfiltered subscription population.
+   - Extract the complete subscription population created on or before
+     the run-start UTC cutoff.
    - Preserve every API page as JSON.
    - Build one combined subscription JSON file without modifying
      the subscription objects returned by Piano.
@@ -42,13 +43,13 @@ const SQL_DATABASE = process.env.SQL_DATABASE;
 const EXTRACT_ROOT = process.env.EXTRACT_ROOT || './extracts';
 
 /*
- * 50 is the page size verified by probe-subscriptions.mjs.
+ * Default to 100 for the current subscription extract.
  *
  * Use a subscription-specific environment variable so that a
  * generic page-limit setting used by another extractor does not
  * silently change this extraction.
  */
-const PAGE_LIMIT = Number(process.env.PIANO_SUBSCRIPTION_PAGE_LIMIT || 50);
+const PAGE_LIMIT = Number(process.env.PIANO_SUBSCRIPTION_PAGE_LIMIT || 100);
 
 const MAX_PAGES = Number(process.env.MAX_PAGES || 10000);
 
@@ -210,6 +211,10 @@ function timestampForPath(date = new Date()) {
 
 function paddedOffset(offset) {
 	return String(offset).padStart(6, '0');
+}
+
+function pianoUtcTimestamp(date) {
+	return Math.floor(date.getTime() / 1000);
 }
 
 function sleep(ms) {
@@ -978,6 +983,15 @@ async function validateSqlLoad(transaction, extractRunId, expectedCounts) {
 
 async function main() {
 	const startedAt = new Date();
+	const sourceCreationCutoff = pianoUtcTimestamp(startedAt);
+	const sourceCreationCutoffUtc = new Date(
+		sourceCreationCutoff * 1000,
+	).toISOString();
+
+	const sourceFilter = {
+		select_by: 'create',
+		end_date: sourceCreationCutoff,
+	};
 
 	const runDir = path.resolve(
 		EXTRACT_ROOT,
@@ -1007,6 +1021,7 @@ async function main() {
 
 	let initialTotal = null;
 	let finalTotal = null;
+	let newSubscriptionsSinceStart = null;
 
 	let initialFirstPageIds = [];
 	let finalFirstPageIds = [];
@@ -1044,6 +1059,11 @@ async function main() {
 
 		console.log(`Page limit: ${PAGE_LIMIT}`);
 
+		console.log(
+			`Subscription creation cutoff: ${sourceCreationCutoffUtc} ` +
+				`(${sourceCreationCutoff})`,
+		);
+
 		console.log(`SQL bulk batch size: ${SQL_BULK_BATCH_SIZE}`);
 
 		console.log(`Output: ${runDir}`);
@@ -1066,6 +1086,7 @@ async function main() {
 			console.log(`Retrieving page ${pageNumber} ` + `at offset ${offset}...`);
 
 			const body = await apiGet(ENDPOINT, {
+				...sourceFilter,
 				offset,
 				limit: PAGE_LIMIT,
 			});
@@ -1254,19 +1275,20 @@ async function main() {
 		/*
 		 * Final source-stability control.
 		 *
-		 * The endpoint is live. Query the first page again
-		 * after extraction and verify:
+		 * Query the same run-start creation-date population again
+		 * and verify:
 		 *
-		 * 1. total is unchanged
-		 * 2. first-page IDs are unchanged
+		 * 1. filtered total is unchanged
+		 * 2. filtered first-page IDs are unchanged
 		 *
-		 * This catches the common cases where subscriptions
-		 * were inserted/deleted or pagination shifted while
-		 * the extraction was running.
+		 * New subscriptions created after the run-start cutoff are
+		 * deliberately outside this snapshot and are checked
+		 * separately below.
 		 */
 		console.log('\nRunning final source-stability control...');
 
 		const finalControl = await apiGet(ENDPOINT, {
+			...sourceFilter,
 			offset: 0,
 			limit: PAGE_LIMIT,
 		});
@@ -1287,22 +1309,50 @@ async function main() {
 
 		if (finalTotal !== initialTotal) {
 			throw new Error(
-				'Piano subscription total changed ' +
+				'Filtered Piano subscription total changed ' +
 					'by the end of extraction: ' +
 					`initial=${initialTotal}, ` +
 					`final=${finalTotal}. ` +
-					'The run is not a stable snapshot; ' +
+					'The run-start creation-date population is not stable; ' +
 					'rerun the extractor.',
 			);
 		}
 
 		if (!sameArray(initialFirstPageIds, finalFirstPageIds)) {
 			throw new Error(
-				'Piano subscription first-page IDs ' +
+				'Filtered Piano subscription first-page IDs ' +
 					'changed during extraction even ' +
-					'though the total remained the same. ' +
-					'The run is not a stable snapshot; ' +
+					'though the filtered total remained the same. ' +
+					'The run-start creation-date population is not stable; ' +
 					'rerun the extractor.',
+			);
+		}
+
+		/*
+		 * Check only for subscriptions created after this run's
+		 * creation cutoff. This is informational and does not affect
+		 * the validity of the filtered snapshot.
+		 */
+		try {
+			const completionCutoff = pianoUtcTimestamp(new Date());
+
+			const postCutoffControl = await apiGet(ENDPOINT, {
+				select_by: 'create',
+				start_date: sourceCreationCutoff + 1,
+				end_date: completionCutoff,
+				offset: 0,
+				limit: 1,
+			});
+
+			requestCount += 1;
+
+			const postCutoffPage = validatePage(postCutoffControl, 0);
+
+			newSubscriptionsSinceStart = postCutoffPage.total;
+		} catch (warningCheckError) {
+			console.warn(
+				'WARNING: Could not check for new subscriptions added ' +
+					`since this extract was started: ${warningCheckError?.message || warningCheckError}`,
 			);
 		}
 
@@ -1391,6 +1441,12 @@ async function main() {
 
 			page_limit: PAGE_LIMIT,
 
+			source_filter_select_by: 'create',
+
+			source_creation_cutoff_utc: sourceCreationCutoffUtc,
+
+			source_creation_cutoff_epoch: sourceCreationCutoff,
+
 			sql_bulk_batch_size: SQL_BULK_BATCH_SIZE,
 
 			api_request_count: requestCount,
@@ -1400,6 +1456,8 @@ async function main() {
 			initial_api_total: initialTotal,
 
 			final_api_total: finalTotal,
+
+			new_subscriptions_since_extract_started: newSubscriptionsSinceStart,
 
 			extracted_subscription_count: extractedCount,
 
@@ -1475,6 +1533,7 @@ async function main() {
 			extractRunId,
 			JSON.stringify({
 				counts: sqlLoad.counts,
+				new_subscriptions_since_extract_started: newSubscriptionsSinceStart,
 				output: runDir,
 			}),
 		);
@@ -1482,6 +1541,16 @@ async function main() {
 		console.log('\nSubscription extraction complete.');
 
 		console.log(JSON.stringify(summary, null, 2));
+
+		if (
+			Number.isInteger(newSubscriptionsSinceStart) &&
+			newSubscriptionsSinceStart > 0
+		) {
+			console.warn(
+				'WARNING: New subscriptions added since this extract was started: ' +
+					`${newSubscriptionsSinceStart}.`,
+			);
+		}
 
 		console.log(`Output: ${runDir}`);
 	} catch (error) {
@@ -1524,6 +1593,12 @@ async function main() {
 
 			page_limit: PAGE_LIMIT,
 
+			source_filter_select_by: 'create',
+
+			source_creation_cutoff_utc: sourceCreationCutoffUtc,
+
+			source_creation_cutoff_epoch: sourceCreationCutoff,
+
 			sql_bulk_batch_size: SQL_BULK_BATCH_SIZE,
 
 			api_request_count: requestCount,
@@ -1533,6 +1608,8 @@ async function main() {
 			initial_api_total: initialTotal,
 
 			final_api_total: finalTotal,
+
+			new_subscriptions_since_extract_started: newSubscriptionsSinceStart,
 
 			extracted_subscription_count: extractedCount,
 
