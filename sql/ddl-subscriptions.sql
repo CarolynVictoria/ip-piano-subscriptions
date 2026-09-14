@@ -11,7 +11,6 @@
    - Keep term_id and resource_rid as relational reference values.
    - Flatten the nested subscription user because there is no
      separate canonical users table in this extraction schema.
-   - Retain the complete subscription source object as JSON.
    - subscription_shared_accounts contains only child accounts
      from ordinary shared/payment subscriptions.
    - Site-license contract users remain exclusively in the
@@ -46,8 +45,6 @@
      Eligible ordinary shared-subscription children are stored
      in dbo.subscription_shared_accounts.
 
-   subscription_json:
-     Preserves the complete source subscription object.
    --------------------------------------------------------- */
 
 create table dbo.subscriptions (
@@ -107,8 +104,6 @@ create table dbo.subscriptions (
     shared_account_limit                int null,
     can_manage_shared_subscription      bit null,
 
-    subscription_json                   nvarchar(max) null,
-
     extracted_at_utc                    datetime2(0) not null
         constraint df_subscriptions_extracted_at
         default sysutcdatetime()
@@ -133,7 +128,6 @@ create table dbo.subscriptions (
    shared_account_number preserves the child's position in the
    source shared_accounts[] array.
 
-   shared_account_json preserves the complete child source object.
    --------------------------------------------------------- */
 
 create table dbo.subscription_shared_accounts (
@@ -155,8 +149,6 @@ create table dbo.subscription_shared_accounts (
 
     redeemed                    bigint null,
     active                      bit null,
-
-    shared_account_json         nvarchar(max) null,
 
     extracted_at_utc            datetime2(0) not null
         constraint df_subscription_shared_accounts_extracted_at
@@ -230,8 +222,6 @@ create table dbo.previous_subscriptions (
     shared_account_limit                int null,
     can_manage_shared_subscription      bit null,
 
-    subscription_json                   nvarchar(max) null,
-
     extracted_at_utc                    datetime2(0) not null
         constraint df_previous_subscriptions_extracted_at
         default sysutcdatetime()
@@ -264,8 +254,6 @@ create table dbo.previous_subscription_shared_accounts (
 
     redeemed                    bigint null,
     active                      bit null,
-
-    shared_account_json         nvarchar(max) null,
 
     extracted_at_utc            datetime2(0) not null
         constraint df_previous_subscription_shared_accounts_extracted_at

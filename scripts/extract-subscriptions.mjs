@@ -113,7 +113,6 @@ const TABLE_SPECS = [
 			acquisition_type: sql.VarChar(100),
 			shared_account_limit: sql.Int,
 			can_manage_shared_subscription: sql.Bit,
-			subscription_json: sql.NVarChar(sql.MAX),
 		},
 	},
 	{
@@ -129,7 +128,6 @@ const TABLE_SPECS = [
 			personal_name: sql.NVarChar(500),
 			redeemed: sql.BigInt,
 			active: sql.Bit,
-			shared_account_json: sql.NVarChar(sql.MAX),
 		},
 	},
 ];
@@ -483,10 +481,8 @@ function validatePage(body, expectedOffset) {
 /* =========================================================
    Transform subscription source objects into SQL rows
 
-   The subscription row preserves the complete source object as
-   subscription_json. Nested Term and Resource data are not
-   duplicated relationally; only term_id and resource_rid are
-   stored here.
+   Nested Term and Resource data are not duplicated relationally;
+   only term_id and resource_rid are stored here.
 
    subscription_shared_accounts is deliberately limited to
    shared_accounts[] under payment subscriptions. Child users
@@ -560,7 +556,6 @@ function buildSqlRowsForSubscriptions(subscriptions) {
 			can_manage_shared_subscription: sqlValue(
 				subscription?.can_manage_shared_subscription,
 			),
-			subscription_json: JSON.stringify(subscription),
 		});
 
 		const sharedAccounts = sourceSharedAccounts || [];
@@ -584,7 +579,6 @@ function buildSqlRowsForSubscriptions(subscriptions) {
 					personal_name: sqlValue(account?.personal_name),
 					redeemed: sqlValue(account?.redeemed),
 					active: sqlValue(account?.active),
-					shared_account_json: JSON.stringify(account),
 				});
 			}
 
@@ -628,11 +622,11 @@ function sqlConfig() {
 		database: SQL_DATABASE,
 		options: {
 			encrypt:
-				String(process.env.SQL_ENCRYPT || 'false').toLowerCase() === 'true',
+				String(process.env.SQL_ENCRYPT || 'true').toLowerCase() === 'true',
 
 			trustServerCertificate:
 				String(
-					process.env.SQL_TRUST_SERVER_CERTIFICATE || 'true',
+					process.env.SQL_TRUST_SERVER_CERTIFICATE || 'false',
 				).toLowerCase() === 'true',
 		},
 		pool: {
