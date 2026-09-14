@@ -313,11 +313,122 @@ router.get('/', async (req, res, next) => {
 				s.status;
 		`);
 
-		const [countResult, dataResult, statusesResult] = await Promise.all([
-			countPromise,
-			dataPromise,
-			statusesPromise,
-		]);
+		const planSummaryPromise = pool.request().query(`
+			WITH subscription_plan_counts AS (
+				SELECT
+					SUM(
+						CAST(
+							CASE
+								WHEN LOWER(
+									REPLACE(
+										COALESCE(s.billing_plan, N''),
+										N' ',
+										N''
+									)
+								) LIKE N'%peryear%'
+								THEN 1
+								ELSE 0
+							END
+							AS BIGINT
+						)
+					) AS annual,
+
+					SUM(
+						CAST(
+							CASE
+								WHEN LOWER(
+									REPLACE(
+										COALESCE(s.billing_plan, N''),
+										N' ',
+										N''
+									)
+								) LIKE N'%permonth%'
+								THEN 1
+								ELSE 0
+							END
+							AS BIGINT
+						)
+					) AS monthly,
+
+					SUM(
+						CAST(
+							CASE
+								WHEN LOWER(
+									REPLACE(
+										COALESCE(s.billing_plan, N''),
+										N' ',
+										N''
+									)
+								) LIKE N'%every3months%'
+								THEN 1
+								ELSE 0
+							END
+							AS BIGINT
+						)
+					) AS quarterly,
+
+					SUM(
+						CAST(
+							CASE
+								WHEN
+									LOWER(
+										REPLACE(
+											COALESCE(s.billing_plan, N''),
+											N' ',
+											N''
+										)
+									) NOT LIKE N'%peryear%'
+
+									AND LOWER(
+										REPLACE(
+											COALESCE(s.billing_plan, N''),
+											N' ',
+											N''
+										)
+									) NOT LIKE N'%permonth%'
+
+									AND LOWER(
+										REPLACE(
+											COALESCE(s.billing_plan, N''),
+											N' ',
+											N''
+										)
+									) NOT LIKE N'%every3months%'
+
+								THEN 1
+								ELSE 0
+							END
+							AS BIGINT
+						)
+					) AS other
+
+				FROM dbo.subscriptions AS s
+			),
+
+			site_license_counts AS (
+				SELECT
+					COUNT_BIG(*) AS site_licenses
+				FROM dbo.site_licensees
+			)
+
+			SELECT
+				p.annual,
+				p.monthly,
+				p.quarterly,
+				p.other,
+				l.site_licenses
+
+			FROM subscription_plan_counts AS p
+			CROSS JOIN site_license_counts AS l;
+		`);
+
+		const [countResult, dataResult, statusesResult, planSummaryResult] =
+			await Promise.all([
+				countPromise,
+				dataPromise,
+				statusesPromise,
+				planSummaryPromise,
+			]);
 
 		const total = Number(countResult.recordset[0]?.total ?? 0);
 
@@ -328,10 +439,35 @@ router.get('/', async (req, res, next) => {
 			count: Number(row.subscription_count),
 		}));
 
+		const totalSubscriptionRecords = statusOptions.reduce(
+			(sum, item) => sum + item.count,
+			0,
+		);
+
+		const planSummaryRow = planSummaryResult.recordset[0] ?? {};
+
+		const planSummary = {
+			annual: Number(planSummaryRow.annual ?? 0),
+
+			monthly: Number(planSummaryRow.monthly ?? 0),
+
+			quarterly: Number(planSummaryRow.quarterly ?? 0),
+
+			siteLicenses: Number(planSummaryRow.site_licenses ?? 0),
+
+			other: Number(planSummaryRow.other ?? 0),
+		};
+
 		return res.json({
 			ok: true,
 
 			items: dataResult.recordset,
+
+			summary: {
+				totalSubscriptionRecords,
+				statuses: statusOptions,
+				plans: planSummary,
+			},
 
 			pagination: {
 				page,
