@@ -314,113 +314,160 @@ router.get('/', async (req, res, next) => {
 		`);
 
 		const planSummaryPromise = pool.request().query(`
-			WITH subscription_plan_counts AS (
-				SELECT
-					SUM(
-						CAST(
-							CASE
-								WHEN LOWER(
-									REPLACE(
-										COALESCE(s.billing_plan, N''),
-										N' ',
-										N''
-									)
-								) LIKE N'%peryear%'
-								THEN 1
-								ELSE 0
-							END
-							AS BIGINT
-						)
-					) AS annual,
+	WITH subscription_plan_counts AS (
+		SELECT
+			SUM(
+				CAST(
+					CASE
+						WHEN p.normalized_plan LIKE N'%peryear%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS all_annual,
 
-					SUM(
-						CAST(
-							CASE
-								WHEN LOWER(
-									REPLACE(
-										COALESCE(s.billing_plan, N''),
-										N' ',
-										N''
-									)
-								) LIKE N'%permonth%'
-								THEN 1
-								ELSE 0
-							END
-							AS BIGINT
-						)
-					) AS monthly,
+			SUM(
+				CAST(
+					CASE
+						WHEN p.normalized_plan LIKE N'%permonth%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS all_monthly,
 
-					SUM(
-						CAST(
-							CASE
-								WHEN LOWER(
-									REPLACE(
-										COALESCE(s.billing_plan, N''),
-										N' ',
-										N''
-									)
-								) LIKE N'%every3months%'
-								THEN 1
-								ELSE 0
-							END
-							AS BIGINT
-						)
-					) AS quarterly,
+			SUM(
+				CAST(
+					CASE
+						WHEN p.normalized_plan LIKE N'%every3months%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS all_quarterly,
 
-					SUM(
-						CAST(
-							CASE
-								WHEN
-									LOWER(
-										REPLACE(
-											COALESCE(s.billing_plan, N''),
-											N' ',
-											N''
-										)
-									) NOT LIKE N'%peryear%'
+			SUM(
+				CAST(
+					CASE
+						WHEN
+							p.normalized_plan NOT LIKE N'%peryear%'
+							AND p.normalized_plan NOT LIKE N'%permonth%'
+							AND p.normalized_plan NOT LIKE N'%every3months%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS all_other,
 
-									AND LOWER(
-										REPLACE(
-											COALESCE(s.billing_plan, N''),
-											N' ',
-											N''
-										)
-									) NOT LIKE N'%permonth%'
+			SUM(
+				CAST(
+					CASE
+						WHEN
+							s.status = 'active'
+							AND p.normalized_plan LIKE N'%peryear%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS active_annual,
 
-									AND LOWER(
-										REPLACE(
-											COALESCE(s.billing_plan, N''),
-											N' ',
-											N''
-										)
-									) NOT LIKE N'%every3months%'
+			SUM(
+				CAST(
+					CASE
+						WHEN
+							s.status = 'active'
+							AND p.normalized_plan LIKE N'%permonth%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS active_monthly,
 
-								THEN 1
-								ELSE 0
-							END
-							AS BIGINT
-						)
-					) AS other
+			SUM(
+				CAST(
+					CASE
+						WHEN
+							s.status = 'active'
+							AND p.normalized_plan LIKE N'%every3months%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS active_quarterly,
 
-				FROM dbo.subscriptions AS s
-			),
+			SUM(
+				CAST(
+					CASE
+						WHEN
+							s.status = 'active'
+							AND p.normalized_plan NOT LIKE N'%peryear%'
+							AND p.normalized_plan NOT LIKE N'%permonth%'
+							AND p.normalized_plan NOT LIKE N'%every3months%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS active_other
 
-			site_license_counts AS (
-				SELECT
-					COUNT_BIG(*) AS site_licenses
-				FROM dbo.site_licensees
-			)
+		FROM dbo.subscriptions AS s
 
+		CROSS APPLY (
 			SELECT
-				p.annual,
-				p.monthly,
-				p.quarterly,
-				p.other,
-				l.site_licenses
+				LOWER(
+					REPLACE(
+						COALESCE(s.billing_plan, N''),
+						N' ',
+						N''
+					)
+				) AS normalized_plan
+		) AS p
+	),
 
-			FROM subscription_plan_counts AS p
-			CROSS JOIN site_license_counts AS l;
-		`);
+	site_license_counts AS (
+		SELECT
+			(
+				SELECT COUNT_BIG(*)
+				FROM dbo.site_licensees
+			) AS all_site_licenses,
+
+			(
+				SELECT COUNT_BIG(*)
+				FROM dbo.site_licensees AS sl
+				WHERE EXISTS (
+					SELECT 1
+					FROM dbo.site_contracts AS sc
+					WHERE
+						sc.licensee_id = sl.licensee_id
+						AND sc.contract_is_active = 1
+				)
+			) AS active_site_licenses
+	)
+
+	SELECT
+		p.all_annual,
+		p.all_monthly,
+		p.all_quarterly,
+		p.all_other,
+
+		p.active_annual,
+		p.active_monthly,
+		p.active_quarterly,
+		p.active_other,
+
+		l.all_site_licenses,
+		l.active_site_licenses
+
+	FROM subscription_plan_counts AS p
+	CROSS JOIN site_license_counts AS l;
+`);
 
 		const [countResult, dataResult, statusesResult, planSummaryResult] =
 			await Promise.all([
@@ -446,16 +493,31 @@ router.get('/', async (req, res, next) => {
 
 		const planSummaryRow = planSummaryResult.recordset[0] ?? {};
 
-		const planSummary = {
-			annual: Number(planSummaryRow.annual ?? 0),
+		const activeSubscriptionRecords =
+			statusOptions.find((item) => item.value === 'active')?.count ?? 0;
 
-			monthly: Number(planSummaryRow.monthly ?? 0),
+		const allPlanSummary = {
+			annual: Number(planSummaryRow.all_annual ?? 0),
 
-			quarterly: Number(planSummaryRow.quarterly ?? 0),
+			monthly: Number(planSummaryRow.all_monthly ?? 0),
 
-			siteLicenses: Number(planSummaryRow.site_licenses ?? 0),
+			quarterly: Number(planSummaryRow.all_quarterly ?? 0),
 
-			other: Number(planSummaryRow.other ?? 0),
+			siteLicenses: Number(planSummaryRow.all_site_licenses ?? 0),
+
+			other: Number(planSummaryRow.all_other ?? 0),
+		};
+
+		const activePlanSummary = {
+			annual: Number(planSummaryRow.active_annual ?? 0),
+
+			monthly: Number(planSummaryRow.active_monthly ?? 0),
+
+			quarterly: Number(planSummaryRow.active_quarterly ?? 0),
+
+			siteLicenses: Number(planSummaryRow.active_site_licenses ?? 0),
+
+			other: Number(planSummaryRow.active_other ?? 0),
 		};
 
 		return res.json({
@@ -464,9 +526,19 @@ router.get('/', async (req, res, next) => {
 			items: dataResult.recordset,
 
 			summary: {
-				totalSubscriptionRecords,
-				statuses: statusOptions,
-				plans: planSummary,
+				all: {
+					totalSubscriptionRecords,
+					statuses: statusOptions,
+					plans: allPlanSummary,
+				},
+
+				active: {
+					totalSubscriptionRecords: activeSubscriptionRecords,
+
+					statuses: statusOptions.filter((item) => item.value === 'active'),
+
+					plans: activePlanSummary,
+				},
 			},
 
 			pagination: {

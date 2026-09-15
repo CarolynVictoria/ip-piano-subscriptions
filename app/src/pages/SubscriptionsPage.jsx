@@ -49,14 +49,28 @@ export default function SubscriptionsPage() {
 	const [subscriptions, setSubscriptions] = useState([]);
 
 	const [summary, setSummary] = useState({
-		totalSubscriptionRecords: 0,
-		statuses: [],
-		plans: {
-			annual: 0,
-			monthly: 0,
-			quarterly: 0,
-			siteLicenses: 0,
-			other: 0,
+		all: {
+			totalSubscriptionRecords: 0,
+			statuses: [],
+			plans: {
+				annual: 0,
+				monthly: 0,
+				quarterly: 0,
+				siteLicenses: 0,
+				other: 0,
+			},
+		},
+
+		active: {
+			totalSubscriptionRecords: 0,
+			statuses: [],
+			plans: {
+				annual: 0,
+				monthly: 0,
+				quarterly: 0,
+				siteLicenses: 0,
+				other: 0,
+			},
 		},
 	});
 
@@ -100,14 +114,28 @@ export default function SubscriptionsPage() {
 
 				setSummary(
 					data.summary ?? {
-						totalSubscriptionRecords: 0,
-						statuses: [],
-						plans: {
-							annual: 0,
-							monthly: 0,
-							quarterly: 0,
-							siteLicenses: 0,
-							other: 0,
+						all: {
+							totalSubscriptionRecords: 0,
+							statuses: [],
+							plans: {
+								annual: 0,
+								monthly: 0,
+								quarterly: 0,
+								siteLicenses: 0,
+								other: 0,
+							},
+						},
+
+						active: {
+							totalSubscriptionRecords: 0,
+							statuses: [],
+							plans: {
+								annual: 0,
+								monthly: 0,
+								quarterly: 0,
+								siteLicenses: 0,
+								other: 0,
+							},
 						},
 					},
 				);

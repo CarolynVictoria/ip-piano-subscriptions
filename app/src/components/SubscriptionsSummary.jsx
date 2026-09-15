@@ -1,3 +1,13 @@
+import { useState } from 'react';
+
+const EMPTY_PLANS = {
+	annual: 0,
+	monthly: 0,
+	quarterly: 0,
+	siteLicenses: 0,
+	other: 0,
+};
+
 function SummaryMetric({ label, value }) {
 	return (
 		<div className='rounded-md border border-base-300 bg-base-100 px-4 py-3'>
@@ -11,17 +21,26 @@ function SummaryMetric({ label, value }) {
 }
 
 export default function SubscriptionsSummary({ summary, loading }) {
-	const statuses = summary?.statuses ?? [];
+	const [planView, setPlanView] = useState('active');
 
-	const plans = summary?.plans ?? {
-		annual: 0,
-		monthly: 0,
-		quarterly: 0,
-		siteLicenses: 0,
-		other: 0,
+	const allSummary = summary?.all ?? {
+		totalSubscriptionRecords: 0,
+		statuses: [],
+		plans: EMPTY_PLANS,
 	};
 
-	const totalSubscriptionRecords = summary?.totalSubscriptionRecords ?? 0;
+	const activeSummary = summary?.active ?? {
+		totalSubscriptionRecords: 0,
+		statuses: [],
+		plans: EMPTY_PLANS,
+	};
+
+	const statuses = allSummary.statuses ?? [];
+
+	const plans =
+		planView === 'active'
+			? (activeSummary.plans ?? EMPTY_PLANS)
+			: (allSummary.plans ?? EMPTY_PLANS);
 
 	return (
 		<section className='mb-4 rounded-lg bg-base-100 p-4 shadow-sm'>
@@ -38,7 +57,9 @@ export default function SubscriptionsSummary({ summary, loading }) {
 					<div className='text-sm opacity-65'>Subscription records</div>
 
 					<div className='text-xl font-semibold'>
-						{loading ? '—' : totalSubscriptionRecords.toLocaleString()}
+						{loading
+							? '—'
+							: allSummary.totalSubscriptionRecords.toLocaleString()}
 					</div>
 				</div>
 			</div>
@@ -60,9 +81,33 @@ export default function SubscriptionsSummary({ summary, loading }) {
 			</div>
 
 			<div className='mt-5'>
-				<h3 className='mb-2 text-sm font-semibold uppercase tracking-wide opacity-60'>
-					Plan Type
-				</h3>
+				<div className='mb-2 flex items-center justify-between gap-4'>
+					<h3 className='text-sm font-semibold uppercase tracking-wide opacity-60'>
+						Plan Type
+					</h3>
+
+					<div className='join'>
+						<button
+							type='button'
+							className={`btn btn-sm join-item ${
+								planView === 'active' ? 'btn-active' : ''
+							}`}
+							onClick={() => setPlanView('active')}
+						>
+							Active Only
+						</button>
+
+						<button
+							type='button'
+							className={`btn btn-sm join-item ${
+								planView === 'all' ? 'btn-active' : ''
+							}`}
+							onClick={() => setPlanView('all')}
+						>
+							All
+						</button>
+					</div>
+				</div>
 
 				<div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5'>
 					<SummaryMetric label='Annual' value={plans.annual} />
