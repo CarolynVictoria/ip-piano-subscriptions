@@ -27,13 +27,42 @@ const EMPTY_SHARED_SUBSCRIPTION_CHILDREN = {
 	total: 0,
 };
 
-function SummaryMetric({ label, value = 0 }) {
-	return (
-		<div className='rounded-md border border-base-300 bg-base-100 px-4 py-3'>
-			<div className='text-sm opacity-65'>{label}</div>
+const EMPTY_SITE_LICENSE_CHILDREN = {
+	redeemed: 0,
+	invited: 0,
+	revoked: 0,
+	total: 0,
+};
 
-			<div className='mt-1 text-2xl font-semibold'>
-				{Number(value ?? 0).toLocaleString()}
+const METRIC_TONES = {
+	default: 'text-base-content',
+	primary: 'text-primary',
+	secondary: 'text-secondary',
+	accent: 'text-accent',
+	info: 'text-info',
+	success: 'text-success',
+	warning: 'text-warning',
+	error: 'text-error',
+};
+
+function SummaryMetric({
+	label,
+	value = 0,
+	tone = 'default',
+	description = '',
+}) {
+	const toneClass = METRIC_TONES[tone] ?? METRIC_TONES.default;
+
+	return (
+		<div className='stats w-full bg-base-200 shadow-sm'>
+			<div className='stat'>
+				<div className='stat-title'>{label}</div>
+
+				<div className={`mt-1 text-base font-normal ${toneClass}`}>
+					{Number(value ?? 0).toLocaleString()}
+				</div>
+
+				{description && <div className='stat-desc'>{description}</div>}
 			</div>
 		</div>
 	);
@@ -48,65 +77,61 @@ function WontRenewMetric({ value = 0, breakdown }) {
 	};
 
 	return (
-		<div className='rounded-md border border-base-300 bg-base-100 px-4 py-3'>
-			<div className='flex items-start justify-between gap-3'>
-				<div>
-					<div className='text-sm opacity-65'>Won&apos;t Renew</div>
+		<div className='stats w-full bg-base-200 shadow-sm'>
+			<div className='stat'>
+				<div className='flex items-start justify-between gap-3'>
+					<div>
+						<div className='stat-title'>Won&apos;t Renew</div>
 
-					<div className='mt-1 text-2xl font-semibold'>
-						{Number(value ?? 0).toLocaleString()}
+						<div className='mt-1 text-base font-normal'>
+							{Number(value ?? 0).toLocaleString()}
+						</div>
 					</div>
-				</div>
 
-				<button
-					type='button'
-					className='btn btn-ghost btn-sm btn-square'
-					aria-label={
-						expanded
-							? "Hide Won't Renew breakdown"
-							: "Show Won't Renew breakdown"
-					}
-					aria-expanded={expanded}
-					onClick={() => setExpanded((current) => !current)}
-				>
-					<span
-						className={`text-lg transition-transform ${
-							expanded ? 'rotate-180' : ''
-						}`}
-						aria-hidden='true'
+					<button
+						type='button'
+						className='btn btn-ghost btn-sm btn-square'
+						aria-label={
+							expanded
+								? "Hide Won't Renew breakdown"
+								: "Show Won't Renew breakdown"
+						}
+						aria-expanded={expanded}
+						onClick={() => setExpanded((current) => !current)}
 					>
-						⌄
-					</span>
-				</button>
-			</div>
-
-			{expanded && (
-				<div className='mt-3 border-t border-base-300 pt-3'>
-					<div className='flex items-center justify-between gap-3 text-sm'>
-						<span className='opacity-65'>Annual</span>
-
-						<span className='font-medium'>
-							{Number(safeBreakdown.annual).toLocaleString()}
+						<span
+							className={`text-lg transition-transform ${
+								expanded ? 'rotate-180' : ''
+							}`}
+							aria-hidden='true'
+						>
+							⌄
 						</span>
-					</div>
-
-					<div className='mt-2 flex items-center justify-between gap-3 text-sm'>
-						<span className='opacity-65'>Monthly</span>
-
-						<span className='font-medium'>
-							{Number(safeBreakdown.monthly).toLocaleString()}
-						</span>
-					</div>
-
-					<div className='mt-2 flex items-center justify-between gap-3 text-sm'>
-						<span className='opacity-65'>Quarterly</span>
-
-						<span className='font-medium'>
-							{Number(safeBreakdown.quarterly).toLocaleString()}
-						</span>
-					</div>
+					</button>
 				</div>
-			)}
+
+				{expanded && (
+					<div className='mt-3 border-t border-base-100 pt-3'>
+						<div className='flex items-center justify-between gap-3 text-sm'>
+							<span className='text-base-content/60'>Annual</span>
+
+							<span>{Number(safeBreakdown.annual).toLocaleString()}</span>
+						</div>
+
+						<div className='mt-2 flex items-center justify-between gap-3 text-sm'>
+							<span className='text-base-content/60'>Monthly</span>
+
+							<span>{Number(safeBreakdown.monthly).toLocaleString()}</span>
+						</div>
+
+						<div className='mt-2 flex items-center justify-between gap-3 text-sm'>
+							<span className='text-base-content/60'>Quarterly</span>
+
+							<span>{Number(safeBreakdown.quarterly).toLocaleString()}</span>
+						</div>
+					</div>
+				)}
+			</div>
 		</div>
 	);
 }
@@ -164,6 +189,11 @@ export default function SubscriptionsSummary({
 		...(selectedSummary.sharedSubscriptionChildren ?? {}),
 	};
 
+	const siteLicenseChildren = {
+		...EMPTY_SITE_LICENSE_CHILDREN,
+		...(selectedSummary.siteLicenseChildren ?? {}),
+	};
+
 	const renewalTotal =
 		Number(plans.annual ?? 0) +
 		Number(plans.monthly ?? 0) +
@@ -177,20 +207,21 @@ export default function SubscriptionsSummary({
 		Number(subscriptionTypes.accessGranted ?? 0);
 
 	return (
-		<section className='mb-4 rounded-lg bg-base-100 p-4 shadow-sm'>
+		<section className='mb-4 rounded-lg bg-base-100 p-4 shadow-sm lg:p-8'>
 			<div className='mb-4 flex items-baseline justify-between gap-4'>
 				<div>
-					<h2 className='text-lg font-semibold'>Subscription Summary</h2>
+					<h2 className='text-lg font-bold'>Subscription Summary</h2>
 
 					<p className='mt-1 text-sm opacity-65'>
-						Current extracted Piano subscription data
+						Piano subscription data extracts from piano.io API and the
+						Subscription Log Export.
 					</p>
 				</div>
 
 				<div className='text-right'>
 					<div className='text-sm opacity-65'>Subscription records</div>
 
-					<div className='text-xl font-semibold'>
+					<div className='text-base font-normal'>
 						{loading
 							? '—'
 							: Number(
@@ -202,11 +233,11 @@ export default function SubscriptionsSummary({
 
 			<div>
 				<div className='mb-2'>
-					<h3 className='text-sm font-semibold uppercase tracking-wide opacity-60'>
-						Status
+					<h3 className='text-sm font-bold opacity-80'>
+						Status — All subscriptions, all time
 					</h3>
 
-					<p className='mt-1 text-sm opacity-65'>API Realtime Statistics</p>
+					<p className='mt-1 text-sm opacity-65'>piano.io API Statistics</p>
 				</div>
 
 				<div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6'>
@@ -220,34 +251,32 @@ export default function SubscriptionsSummary({
 				</div>
 			</div>
 
-			<div className='mt-5'>
-				<div className='mb-2 flex items-center justify-between gap-4'>
-					<h3 className='text-sm font-semibold uppercase tracking-wide opacity-60'>
-						Renewal Type
-					</h3>
+			<div className='mt-5 flex items-center justify-end'>
+				<div className='join'>
+					<button
+						type='button'
+						className={`btn btn-sm join-item ${
+							planView === 'active' ? 'btn-active' : ''
+						}`}
+						onClick={() => onPlanViewChange('active')}
+					>
+						Active Only
+					</button>
 
-					<div className='join'>
-						<button
-							type='button'
-							className={`btn btn-sm join-item ${
-								planView === 'active' ? 'btn-active' : ''
-							}`}
-							onClick={() => onPlanViewChange('active')}
-						>
-							Active Only
-						</button>
-
-						<button
-							type='button'
-							className={`btn btn-sm join-item ${
-								planView === 'all' ? 'btn-active' : ''
-							}`}
-							onClick={() => onPlanViewChange('all')}
-						>
-							All
-						</button>
-					</div>
+					<button
+						type='button'
+						className={`btn btn-sm join-item ${
+							planView === 'all' ? 'btn-active' : ''
+						}`}
+						onClick={() => onPlanViewChange('all')}
+					>
+						All
+					</button>
 				</div>
+			</div>
+
+			<div className='mt-3 rounded-lg border border-base-100 bg-base-200/40 p-4'>
+				<h3 className='mb-3 text-sm font-bold opacity-70'>Renewal Type</h3>
 
 				<div className='grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-5'>
 					<SummaryMetric label='Annual' value={plans.annual} />
@@ -265,10 +294,8 @@ export default function SubscriptionsSummary({
 				</div>
 			</div>
 
-			<div className='mt-5'>
-				<h3 className='mb-2 text-sm font-semibold uppercase tracking-wide opacity-60'>
-					Subscription Type
-				</h3>
+			<div className='mt-5 rounded-lg border border-base-100 bg-base-200/40 p-4'>
+				<h3 className='mb-3 text-sm font-bold opacity-70'>Subscription Type</h3>
 
 				<div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-5'>
 					<SummaryMetric
@@ -295,8 +322,8 @@ export default function SubscriptionsSummary({
 				</div>
 			</div>
 
-			<div className='mt-5'>
-				<h3 className='mb-2 text-sm font-semibold uppercase tracking-wide opacity-60'>
+			<div className='mt-5 rounded-lg border border-base-100 bg-base-200/40 p-4'>
+				<h3 className='mb-3 text-sm font-bold opacity-70'>
 					Shared Subscription Child Accounts
 				</h3>
 
@@ -314,6 +341,31 @@ export default function SubscriptionsSummary({
 					<SummaryMetric
 						label='Total Shared Subscription Child Accounts'
 						value={sharedSubscriptionChildren.total}
+					/>
+				</div>
+			</div>
+
+			<div className='mt-5 rounded-lg border border-base-100 bg-base-200/40 p-4'>
+				<h3 className='mb-3 text-sm font-bold opacity-70'>
+					Site License Child Accounts
+				</h3>
+
+				<div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-4'>
+					<SummaryMetric
+						label='Redeemed'
+						value={siteLicenseChildren.redeemed}
+					/>
+
+					<SummaryMetric
+						label='Invited Not Redeemed'
+						value={siteLicenseChildren.invited}
+					/>
+
+					<SummaryMetric label='Revoked' value={siteLicenseChildren.revoked} />
+
+					<SummaryMetric
+						label='Total Site License Child Accounts'
+						value={siteLicenseChildren.total}
 					/>
 				</div>
 			</div>

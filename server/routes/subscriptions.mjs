@@ -636,6 +636,127 @@ WITH payment_subscription_base AS (
 		COALESCE(p.shared_account_limit, 0) > 0
 ),
 
+site_license_child_account_base AS (
+	SELECT
+		u.contract_id,
+		UPPER(
+			LTRIM(
+				RTRIM(
+					COALESCE(u.status, '')
+				)
+			)
+		) AS status
+
+	FROM dbo.site_contract_users AS u
+
+	UNION ALL
+
+	SELECT
+		u.contract_id,
+		UPPER(
+			LTRIM(
+				RTRIM(
+					COALESCE(u.status, '')
+				)
+			)
+		) AS status
+
+	FROM dbo.site_contract_domain_users AS u
+),
+
+site_license_child_account_counts AS (
+	SELECT
+		SUM(
+			CAST(
+				CASE
+					WHEN u.status = 'ACTIVE'
+					THEN 1
+					ELSE 0
+				END
+				AS BIGINT
+			)
+		) AS all_redeemed,
+
+		SUM(
+			CAST(
+				CASE
+					WHEN u.status = 'PENDING'
+					THEN 1
+					ELSE 0
+				END
+				AS BIGINT
+			)
+		) AS all_invited,
+
+		SUM(
+			CAST(
+				CASE
+					WHEN u.status = 'REVOKED'
+					THEN 1
+					ELSE 0
+				END
+				AS BIGINT
+			)
+		) AS all_revoked,
+
+		COUNT_BIG(*) AS all_total,
+
+		SUM(
+			CAST(
+				CASE
+					WHEN
+						c.contract_is_active = 1
+						AND u.status = 'ACTIVE'
+					THEN 1
+					ELSE 0
+				END
+				AS BIGINT
+			)
+		) AS active_redeemed,
+
+		SUM(
+			CAST(
+				CASE
+					WHEN
+						c.contract_is_active = 1
+						AND u.status = 'PENDING'
+					THEN 1
+					ELSE 0
+				END
+				AS BIGINT
+			)
+		) AS active_invited,
+
+		SUM(
+			CAST(
+				CASE
+					WHEN
+						c.contract_is_active = 1
+						AND u.status = 'REVOKED'
+					THEN 1
+					ELSE 0
+				END
+				AS BIGINT
+			)
+		) AS active_revoked,
+
+		SUM(
+			CAST(
+				CASE
+					WHEN c.contract_is_active = 1
+					THEN 1
+					ELSE 0
+				END
+				AS BIGINT
+			)
+		) AS active_total
+
+	FROM site_license_child_account_base AS u
+
+	INNER JOIN dbo.site_contracts AS c
+		ON c.contract_id = u.contract_id
+),
+
 	site_license_counts AS (
 		SELECT
 			(
@@ -700,13 +821,24 @@ WITH payment_subscription_base AS (
 
 	c.active_invited AS active_shared_child_invited,
 	c.active_redeemed AS active_shared_child_redeemed,
-	c.active_total AS active_shared_child_total
+	c.active_total AS active_shared_child_total,
+
+	su.all_redeemed AS all_site_child_redeemed,
+	su.all_invited AS all_site_child_invited,
+	su.all_revoked AS all_site_child_revoked,
+	su.all_total AS all_site_child_total,
+
+	su.active_redeemed AS active_site_child_redeemed,
+	su.active_invited AS active_site_child_invited,
+	su.active_revoked AS active_site_child_revoked,
+	su.active_total AS active_site_child_total
 
 FROM renewal_counts AS r
 CROSS JOIN subscription_type_counts AS t
 CROSS JOIN site_license_counts AS l
 CROSS JOIN access_granted_counts AS a
-CROSS JOIN shared_subscription_child_counts AS c;
+CROSS JOIN shared_subscription_child_counts AS c
+CROSS JOIN site_license_child_account_counts AS su;
 `);
 
 		const [countResult, dataResult, statusesResult, planSummaryResult] =
@@ -813,6 +945,26 @@ CROSS JOIN shared_subscription_child_counts AS c;
 			total: Number(planSummaryRow.active_shared_child_total ?? 0),
 		};
 
+		const allSiteLicenseChildren = {
+			redeemed: Number(planSummaryRow.all_site_child_redeemed ?? 0),
+
+			invited: Number(planSummaryRow.all_site_child_invited ?? 0),
+
+			revoked: Number(planSummaryRow.all_site_child_revoked ?? 0),
+
+			total: Number(planSummaryRow.all_site_child_total ?? 0),
+		};
+
+		const activeSiteLicenseChildren = {
+			redeemed: Number(planSummaryRow.active_site_child_redeemed ?? 0),
+
+			invited: Number(planSummaryRow.active_site_child_invited ?? 0),
+
+			revoked: Number(planSummaryRow.active_site_child_revoked ?? 0),
+
+			total: Number(planSummaryRow.active_site_child_total ?? 0),
+		};
+
 		return res.json({
 			ok: true,
 
@@ -825,6 +977,7 @@ CROSS JOIN shared_subscription_child_counts AS c;
 					plans: allPlanSummary,
 					subscriptionTypes: allSubscriptionTypes,
 					sharedSubscriptionChildren: allSharedSubscriptionChildren,
+					siteLicenseChildren: allSiteLicenseChildren,
 				},
 
 				active: {
@@ -835,6 +988,7 @@ CROSS JOIN shared_subscription_child_counts AS c;
 					plans: activePlanSummary,
 					subscriptionTypes: activeSubscriptionTypes,
 					sharedSubscriptionChildren: activeSharedSubscriptionChildren,
+					siteLicenseChildren: activeSiteLicenseChildren,
 				},
 			},
 
