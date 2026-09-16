@@ -307,7 +307,7 @@ export default function SubscriptionsPage() {
 						</form>
 
 						<label className='form-control'>
-							<span className='mb-1 text-sm font-medium'>Status</span>
+							<span className='mb-1 pr-2 text-sm font-medium'>Status</span>
 
 							<select
 								className='select select-bordered min-w-52'
@@ -325,7 +325,7 @@ export default function SubscriptionsPage() {
 						</label>
 
 						<label className='form-control'>
-							<span className='mb-1 text-sm font-medium'>Rows</span>
+							<span className='mb-1 pr-2 text-sm font-medium'>Rows</span>
 
 							<select
 								className='select select-bordered'
