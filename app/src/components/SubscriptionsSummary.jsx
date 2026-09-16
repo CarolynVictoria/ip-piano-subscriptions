@@ -56,27 +56,52 @@ function SummaryMetric({
 	tone = 'default',
 	description = '',
 	surface = 'default',
+	onClick = null,
+	active = false,
+	disabled = false,
 }) {
 	const toneClass = METRIC_TONES[tone] ?? METRIC_TONES.default;
 
 	const surfaceClass = METRIC_SURFACES[surface] ?? METRIC_SURFACES.default;
 
-	return (
-		<div className={`stats w-full ${surfaceClass}`}>
-			<div className='stat'>
-				<div className='stat-title'>{label}</div>
+	const metricContent = (
+		<div className='stat'>
+			<div className='stat-title'>{label}</div>
 
-				<div className={`mt-1 text-base font-normal ${toneClass}`}>
-					{Number(value ?? 0).toLocaleString()}
-				</div>
-
-				{description && <div className='stat-desc'>{description}</div>}
+			<div className={`mt-1 text-base font-normal ${toneClass}`}>
+				{Number(value ?? 0).toLocaleString()}
 			</div>
+
+			{description && <div className='stat-desc'>{description}</div>}
 		</div>
 	);
+
+	if (typeof onClick === 'function') {
+		return (
+			<button
+				type='button'
+				className={`stats w-full cursor-pointer appearance-none text-left transition ${
+					active ? 'ring-4 ring-[#A1CCFC]' : 'hover:ring-1 hover:ring-[#2d6ed8]'
+				} ${surfaceClass}`}
+				onClick={onClick}
+				aria-pressed={active}
+				disabled={disabled}
+			>
+				{metricContent}
+			</button>
+		);
+	}
+
+	return <div className={`stats w-full ${surfaceClass}`}>{metricContent}</div>;
 }
 
-function WontRenewMetric({ value = 0, breakdown }) {
+function WontRenewMetric({
+	value = 0,
+	breakdown,
+	onSelect = null,
+	active = false,
+	disabled = false,
+}) {
 	const [expanded, setExpanded] = useState(false);
 
 	const safeBreakdown = {
@@ -85,16 +110,26 @@ function WontRenewMetric({ value = 0, breakdown }) {
 	};
 
 	return (
-		<div className='stats w-full bg-base-200 shadow-sm'>
+		<div
+			className={`stats w-full bg-base-200 shadow-sm transition ${
+				active ? 'ring-4 ring-[#A1CCFC]' : 'hover:ring-1 hover:ring-[#2d6ed8]'
+			}`}
+		>
 			<div className='stat'>
 				<div className='flex items-start justify-between gap-3'>
-					<div>
+					<button
+						type='button'
+						className='min-w-0 flex-1 cursor-pointer appearance-none text-left'
+						onClick={onSelect}
+						aria-pressed={active}
+						disabled={disabled}
+					>
 						<div className='stat-title'>Won&apos;t Renew</div>
 
 						<div className='mt-1 text-base font-normal'>
 							{Number(value ?? 0).toLocaleString()}
 						</div>
-					</div>
+					</button>
 
 					<button
 						type='button'
@@ -183,6 +218,9 @@ export default function SubscriptionsSummary({
 	loading,
 	planView,
 	onPlanViewChange,
+	selectedRenewalType,
+	onRenewalTypeChange,
+	onClearRenewalType,
 }) {
 	const allSummary = {
 		totalSubscriptionRecords: 0,
@@ -316,19 +354,62 @@ export default function SubscriptionsSummary({
 				</div>
 			</div>
 
+			{loading && (
+				<div
+					className='mt-3 flex items-center gap-2 rounded-lg border border-[#2d6ed8]/30 bg-[#2d6ed8]/5 px-4 py-2 text-sm'
+					role='status'
+					aria-live='polite'
+				>
+					<span className='loading loading-spinner loading-sm' />
+					<span>Refreshing subscription results...</span>
+				</div>
+			)}
+
 			<div className='mt-3 rounded-lg border border-base-100 bg-base-200/40 p-4'>
-				<h3 className='mb-3 text-sm font-bold opacity-70'>Renewal Type</h3>
+				<div className='mb-3 flex items-center justify-between gap-3'>
+					<h3 className='text-sm font-bold opacity-70'>Renewal Type</h3>
+
+					<button
+						type='button'
+						className='btn btn-xs rounded-full'
+						onClick={onClearRenewalType}
+						disabled={!selectedRenewalType || loading}
+					>
+						Clear Selected
+					</button>
+				</div>
 
 				<div className='grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-5'>
-					<SummaryMetric label='Annual' value={plans.annual} />
+					<SummaryMetric
+						label='Annual'
+						value={plans.annual}
+						onClick={() => onRenewalTypeChange('annual')}
+						active={selectedRenewalType === 'annual'}
+						disabled={loading}
+					/>
 
-					<SummaryMetric label='Monthly' value={plans.monthly} />
+					<SummaryMetric
+						label='Monthly'
+						value={plans.monthly}
+						onClick={() => onRenewalTypeChange('monthly')}
+						active={selectedRenewalType === 'monthly'}
+						disabled={loading}
+					/>
 
-					<SummaryMetric label='Quarterly' value={plans.quarterly} />
+					<SummaryMetric
+						label='Quarterly'
+						value={plans.quarterly}
+						onClick={() => onRenewalTypeChange('quarterly')}
+						active={selectedRenewalType === 'quarterly'}
+						disabled={loading}
+					/>
 
 					<WontRenewMetric
 						value={plans.wontRenew}
 						breakdown={plans.wontRenewBreakdown}
+						onSelect={() => onRenewalTypeChange('wontRenew')}
+						active={selectedRenewalType === 'wontRenew'}
+						disabled={loading}
 					/>
 
 					<SummaryMetric label='Total' value={renewalTotal} />

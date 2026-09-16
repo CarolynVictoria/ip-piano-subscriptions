@@ -74,11 +74,19 @@ export default function SubscriptionsPage() {
 		},
 	});
 
-	/* Begin refactor for clickable summary cards.*/
+	/* Begin refactor for clickable summary cards. */
 	const [summaryView, setSummaryView] = useState('active');
-	const [dataset, setDataset] = useState('');
+	const [renewalType, setRenewalType] = useState('');
 
-	/* End refactor for clickable summary cards.*/
+	/*
+	 * Active Only / All controls the scope of a drill-down.
+	 *
+	 * With no drill-down selected, preserve the existing grid behavior
+	 * by requesting all subscriptions.
+	 */
+	const subscriptionScope = renewalType ? summaryView : 'all';
+
+	/* End refactor for clickable summary cards. */
 
 	const [pagination, setPagination] = useState({
 		page: 1,
@@ -113,6 +121,8 @@ export default function SubscriptionsPage() {
 					pageSize,
 					q: search,
 					status,
+					scope: subscriptionScope,
+					renewalType,
 					signal: controller.signal,
 				});
 
@@ -178,7 +188,25 @@ export default function SubscriptionsPage() {
 		return () => {
 			controller.abort();
 		};
-	}, [page, pageSize, search, status]);
+	}, [page, pageSize, search, status, subscriptionScope, renewalType]);
+
+	function handleSummaryViewChange(value) {
+		setSummaryView(value);
+
+		if (renewalType) {
+			setPage(1);
+		}
+	}
+
+	function handleRenewalTypeChange(value) {
+		setRenewalType(value);
+		setPage(1);
+	}
+
+	function handleClearRenewalType() {
+		setRenewalType('');
+		setPage(1);
+	}
 
 	function handleSearchSubmit(event) {
 		event.preventDefault();
@@ -234,7 +262,10 @@ export default function SubscriptionsPage() {
 					summary={summary}
 					loading={loading}
 					planView={summaryView}
-					onPlanViewChange={setSummaryView}
+					onPlanViewChange={handleSummaryViewChange}
+					selectedRenewalType={renewalType}
+					onRenewalTypeChange={handleRenewalTypeChange}
+					onClearRenewalType={handleClearRenewalType}
 				/>
 
 				<div className='mb-4 rounded-lg bg-base-100 p-4 shadow-sm'>
@@ -283,7 +314,7 @@ export default function SubscriptionsPage() {
 								value={status}
 								onChange={handleStatusChange}
 							>
-								<option value=''>All statuses</option>
+								<option value=''>All Status</option>
 
 								{statusOptions.map((option) => (
 									<option key={option.value} value={option.value}>
@@ -304,6 +335,8 @@ export default function SubscriptionsPage() {
 								<option value='25'>25</option>
 								<option value='50'>50</option>
 								<option value='100'>100</option>
+								<option value='500'>500</option>
+								<option value='1000'>1000</option>
 							</select>
 						</label>
 					</div>

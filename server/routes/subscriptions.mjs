@@ -5,11 +5,20 @@ import { getPool } from '../db.mjs';
 
 const router = express.Router();
 
-const DEFAULT_PAGE_SIZE = 50;
-const MAX_PAGE_SIZE = 200;
+const DEFAULT_PAGE_SIZE = 100;
+const MAX_PAGE_SIZE = 1000;
 
 const MAX_SEARCH_LENGTH = 200;
 const MAX_STATUS_LENGTH = 100;
+
+const VALID_SCOPES = new Set(['all', 'active']);
+
+const VALID_RENEWAL_TYPES = new Set([
+	'annual',
+	'monthly',
+	'quarterly',
+	'wontRenew',
+]);
 
 /* =========================================================
    Query-parameter validation
@@ -70,11 +79,35 @@ function readOptionalString(value, { name, maxLength }) {
 	return trimmed;
 }
 
+function readOptionalEnum(value, { name, allowedValues, defaultValue = null }) {
+	if (value === undefined) {
+		return defaultValue;
+	}
+
+	if (typeof value !== 'string') {
+		throw new QueryParameterError(`${name} must be a single string value.`);
+	}
+
+	const trimmed = value.trim();
+
+	if (trimmed.length === 0) {
+		return defaultValue;
+	}
+
+	if (!allowedValues.has(trimmed)) {
+		throw new QueryParameterError(
+			`${name} must be one of: ${Array.from(allowedValues).join(', ')}.`,
+		);
+	}
+
+	return trimmed;
+}
+
 /* =========================================================
    Subscription filtering
    ========================================================= */
 
-function buildWhereClause({ search, status }) {
+function buildWhereClause({ search, status, scope, renewalType }) {
 	const clauses = [];
 
 	if (search !== null) {
@@ -132,6 +165,91 @@ function buildWhereClause({ search, status }) {
 		clauses.push('s.status = @status');
 	}
 
+	/*
+	 * "Active" uses Piano's reporting/access status, not the
+	 * subscription snapshot status.
+	 */
+	if (scope === 'active') {
+		clauses.push(`s.status_name_in_reports = 'active'`);
+	}
+
+	/*
+	 * Renewal Type definitions intentionally match the
+	 * payment_subscription_base / renewal_counts summary query.
+	 *
+	 * Renewal Type applies only to payment terms.
+	 */
+	if (renewalType !== null) {
+		const paymentTermCondition = `
+			EXISTS (
+				SELECT 1
+				FROM dbo.terms AS t
+				WHERE
+					t.term_id = s.term_id
+					AND t.type = 'payment'
+			)
+		`;
+
+		switch (renewalType) {
+			case 'annual':
+				clauses.push(`
+					(
+						${paymentTermCondition}
+						AND s.auto_renew = 1
+						AND LOWER(
+							REPLACE(
+								COALESCE(s.billing_plan, N''),
+								N' ',
+								N''
+							)
+						) LIKE N'%peryear%'
+					)
+				`);
+				break;
+
+			case 'monthly':
+				clauses.push(`
+					(
+						${paymentTermCondition}
+						AND s.auto_renew = 1
+						AND LOWER(
+							REPLACE(
+								COALESCE(s.billing_plan, N''),
+								N' ',
+								N''
+							)
+						) LIKE N'%permonth%'
+					)
+				`);
+				break;
+
+			case 'quarterly':
+				clauses.push(`
+					(
+						${paymentTermCondition}
+						AND s.auto_renew = 1
+						AND LOWER(
+							REPLACE(
+								COALESCE(s.billing_plan, N''),
+								N' ',
+								N''
+							)
+						) LIKE N'%every3months%'
+					)
+				`);
+				break;
+
+			case 'wontRenew':
+				clauses.push(`
+					(
+						${paymentTermCondition}
+						AND s.auto_renew = 0
+					)
+				`);
+				break;
+		}
+	}
+
 	if (clauses.length === 0) {
 		return '';
 	}
@@ -160,6 +278,8 @@ router.get('/', async (req, res, next) => {
 	let pageSize;
 	let search;
 	let status;
+	let scope;
+	let renewalType;
 
 	try {
 		page = readPositiveInteger(req.query.page, {
@@ -182,6 +302,17 @@ router.get('/', async (req, res, next) => {
 			name: 'status',
 			maxLength: MAX_STATUS_LENGTH,
 		});
+
+		scope = readOptionalEnum(req.query.scope, {
+			name: 'scope',
+			allowedValues: VALID_SCOPES,
+			defaultValue: 'all',
+		});
+
+		renewalType = readOptionalEnum(req.query.renewalType, {
+			name: 'renewalType',
+			allowedValues: VALID_RENEWAL_TYPES,
+		});
 	} catch (error) {
 		if (error instanceof QueryParameterError) {
 			return res.status(400).json({
@@ -198,6 +329,8 @@ router.get('/', async (req, res, next) => {
 	const filters = {
 		search,
 		status,
+		scope,
+		renewalType,
 	};
 
 	const whereClause = buildWhereClause(filters);
@@ -1002,6 +1135,8 @@ CROSS JOIN site_license_child_account_counts AS su;
 			filters: {
 				q: search,
 				status,
+				scope,
+				renewalType,
 			},
 
 			filterOptions: {

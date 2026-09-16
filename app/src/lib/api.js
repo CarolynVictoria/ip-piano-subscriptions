@@ -13,12 +13,15 @@ export async function getSubscriptions({
 	pageSize = 25,
 	q = '',
 	status = '',
+	scope = 'all',
+	renewalType = '',
 	signal,
 } = {}) {
 	const params = new URLSearchParams();
 
 	params.set('page', String(page));
 	params.set('pageSize', String(pageSize));
+	params.set('scope', scope);
 
 	const trimmedSearch = q.trim();
 
@@ -30,7 +33,15 @@ export async function getSubscriptions({
 		params.set('status', status);
 	}
 
-	const response = await fetch(`/api/subscriptions?${params.toString()}`, {
+	if (renewalType) {
+		params.set('renewalType', renewalType);
+	}
+
+	const requestUrl = `/api/subscriptions?${params.toString()}`;
+
+	console.log('Subscription API request:', requestUrl);
+
+	const response = await fetch(requestUrl, {
 		method: 'GET',
 
 		headers: {
