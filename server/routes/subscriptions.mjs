@@ -314,12 +314,13 @@ router.get('/', async (req, res, next) => {
 		`);
 
 		const planSummaryPromise = pool.request().query(`
-	WITH payment_subscription_base AS (
-		SELECT
-			s.status,
-			s.status_name_in_reports,
-			s.auto_renew,
-			s.shared_account_limit,
+WITH payment_subscription_base AS (
+	SELECT
+		s.subscription_id,
+		s.status,
+		s.status_name_in_reports,
+		s.auto_renew,
+		s.shared_account_limit,
 
 			LOWER(
 				REPLACE(
@@ -583,6 +584,57 @@ router.get('/', async (req, res, next) => {
 
 		FROM payment_subscription_base
 	),
+	shared_subscription_child_counts AS (
+	SELECT
+		COUNT_BIG(*) AS all_total,
+
+		COUNT_BIG(
+			CASE
+				WHEN sa.redeemed IS NULL
+				THEN 1
+			END
+		) AS all_invited,
+
+		COUNT_BIG(
+			CASE
+				WHEN sa.redeemed IS NOT NULL
+				THEN 1
+			END
+		) AS all_redeemed,
+
+		COUNT_BIG(
+			CASE
+				WHEN
+					p.status_name_in_reports = 'active'
+					AND sa.redeemed IS NULL
+				THEN 1
+			END
+		) AS active_invited,
+
+		COUNT_BIG(
+			CASE
+				WHEN
+					p.status_name_in_reports = 'active'
+					AND sa.redeemed IS NOT NULL
+				THEN 1
+			END
+		) AS active_redeemed,
+
+		COUNT_BIG(
+			CASE
+				WHEN p.status_name_in_reports = 'active'
+				THEN 1
+			END
+		) AS active_total
+
+	FROM dbo.subscription_shared_accounts AS sa
+
+	INNER JOIN payment_subscription_base AS p
+		ON p.subscription_id = sa.subscription_id
+
+	WHERE
+		COALESCE(p.shared_account_limit, 0) > 0
+),
 
 	site_license_counts AS (
 		SELECT
@@ -637,15 +689,24 @@ router.get('/', async (req, res, next) => {
 		t.active_single_user,
 		t.active_shared_subscription,
 
-		l.all_site_licenses,
-		l.active_site_licenses,
+	l.all_site_licenses,
+	l.active_site_licenses,
 
-		a.access_granted_users
+	a.access_granted_users,
 
-	FROM renewal_counts AS r
-	CROSS JOIN subscription_type_counts AS t
-	CROSS JOIN site_license_counts AS l
-	CROSS JOIN access_granted_counts AS a;
+	c.all_invited AS all_shared_child_invited,
+	c.all_redeemed AS all_shared_child_redeemed,
+	c.all_total AS all_shared_child_total,
+
+	c.active_invited AS active_shared_child_invited,
+	c.active_redeemed AS active_shared_child_redeemed,
+	c.active_total AS active_shared_child_total
+
+FROM renewal_counts AS r
+CROSS JOIN subscription_type_counts AS t
+CROSS JOIN site_license_counts AS l
+CROSS JOIN access_granted_counts AS a
+CROSS JOIN shared_subscription_child_counts AS c;
 `);
 
 		const [countResult, dataResult, statusesResult, planSummaryResult] =
@@ -736,6 +797,22 @@ router.get('/', async (req, res, next) => {
 			accessGranted: accessGrantedUsers,
 		};
 
+		const allSharedSubscriptionChildren = {
+			invited: Number(planSummaryRow.all_shared_child_invited ?? 0),
+
+			redeemed: Number(planSummaryRow.all_shared_child_redeemed ?? 0),
+
+			total: Number(planSummaryRow.all_shared_child_total ?? 0),
+		};
+
+		const activeSharedSubscriptionChildren = {
+			invited: Number(planSummaryRow.active_shared_child_invited ?? 0),
+
+			redeemed: Number(planSummaryRow.active_shared_child_redeemed ?? 0),
+
+			total: Number(planSummaryRow.active_shared_child_total ?? 0),
+		};
+
 		return res.json({
 			ok: true,
 
@@ -747,6 +824,7 @@ router.get('/', async (req, res, next) => {
 					statuses: statusOptions,
 					plans: allPlanSummary,
 					subscriptionTypes: allSubscriptionTypes,
+					sharedSubscriptionChildren: allSharedSubscriptionChildren,
 				},
 
 				active: {
@@ -756,6 +834,7 @@ router.get('/', async (req, res, next) => {
 
 					plans: activePlanSummary,
 					subscriptionTypes: activeSubscriptionTypes,
+					sharedSubscriptionChildren: activeSharedSubscriptionChildren,
 				},
 			},
 

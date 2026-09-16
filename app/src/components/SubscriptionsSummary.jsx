@@ -21,6 +21,12 @@ const EMPTY_SUBSCRIPTION_TYPES = {
 	accessGranted: 0,
 };
 
+const EMPTY_SHARED_SUBSCRIPTION_CHILDREN = {
+	invited: 0,
+	redeemed: 0,
+	total: 0,
+};
+
 function SummaryMetric({ label, value = 0 }) {
 	return (
 		<div className='rounded-md border border-base-300 bg-base-100 px-4 py-3'>
@@ -113,9 +119,12 @@ function statusLabel(value) {
 	return value;
 }
 
-export default function SubscriptionsSummary({ summary, loading }) {
-	const [planView, setPlanView] = useState('active');
-
+export default function SubscriptionsSummary({
+	summary,
+	loading,
+	planView,
+	onPlanViewChange,
+}) {
 	const allSummary = {
 		totalSubscriptionRecords: 0,
 		statuses: [],
@@ -148,6 +157,11 @@ export default function SubscriptionsSummary({ summary, loading }) {
 	const subscriptionTypes = {
 		...EMPTY_SUBSCRIPTION_TYPES,
 		...(selectedSummary.subscriptionTypes ?? {}),
+	};
+
+	const sharedSubscriptionChildren = {
+		...EMPTY_SHARED_SUBSCRIPTION_CHILDREN,
+		...(selectedSummary.sharedSubscriptionChildren ?? {}),
 	};
 
 	const renewalTotal =
@@ -218,7 +232,7 @@ export default function SubscriptionsSummary({ summary, loading }) {
 							className={`btn btn-sm join-item ${
 								planView === 'active' ? 'btn-active' : ''
 							}`}
-							onClick={() => setPlanView('active')}
+							onClick={() => onPlanViewChange('active')}
 						>
 							Active Only
 						</button>
@@ -228,7 +242,7 @@ export default function SubscriptionsSummary({ summary, loading }) {
 							className={`btn btn-sm join-item ${
 								planView === 'all' ? 'btn-active' : ''
 							}`}
-							onClick={() => setPlanView('all')}
+							onClick={() => onPlanViewChange('all')}
 						>
 							All
 						</button>
@@ -278,6 +292,29 @@ export default function SubscriptionsSummary({ summary, loading }) {
 					/>
 
 					<SummaryMetric label='Total' value={subscriptionTypeTotal} />
+				</div>
+			</div>
+
+			<div className='mt-5'>
+				<h3 className='mb-2 text-sm font-semibold uppercase tracking-wide opacity-60'>
+					Shared Subscription Child Accounts
+				</h3>
+
+				<div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-3'>
+					<SummaryMetric
+						label='Redeemed'
+						value={sharedSubscriptionChildren.redeemed}
+					/>
+
+					<SummaryMetric
+						label='Invited Not Redeemed'
+						value={sharedSubscriptionChildren.invited}
+					/>
+
+					<SummaryMetric
+						label='Total Shared Subscription Child Accounts'
+						value={sharedSubscriptionChildren.total}
+					/>
 				</div>
 			</div>
 		</section>

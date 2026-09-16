@@ -74,6 +74,12 @@ export default function SubscriptionsPage() {
 		},
 	});
 
+	/* Begin refactor for clickable summary cards.*/
+	const [summaryView, setSummaryView] = useState('active');
+	const [dataset, setDataset] = useState('');
+
+	/* End refactor for clickable summary cards.*/
+
 	const [pagination, setPagination] = useState({
 		page: 1,
 		pageSize: DEFAULT_PAGE_SIZE,
@@ -226,7 +232,12 @@ export default function SubscriptionsPage() {
 					</p>
 				</div>
 
-				<SubscriptionsSummary summary={summary} loading={loading} />
+				<SubscriptionsSummary
+					summary={summary}
+					loading={loading}
+					planView={summaryView}
+					onPlanViewChange={setSummaryView}
+				/>
 
 				<div className='mb-4 rounded-lg bg-base-100 p-4 shadow-sm'>
 					<div className='flex flex-col gap-4 lg:flex-row lg:items-end'>
