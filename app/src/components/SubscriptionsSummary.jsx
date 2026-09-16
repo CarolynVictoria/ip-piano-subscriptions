@@ -1,10 +1,17 @@
 import { useState } from 'react';
 
+const EMPTY_WONT_RENEW_BREAKDOWN = {
+	annual: 0,
+	monthly: 0,
+	quarterly: 0,
+};
+
 const EMPTY_PLANS = {
 	annual: 0,
 	monthly: 0,
 	quarterly: 0,
 	wontRenew: 0,
+	wontRenewBreakdown: EMPTY_WONT_RENEW_BREAKDOWN,
 };
 
 const EMPTY_SUBSCRIPTION_TYPES = {
@@ -22,6 +29,78 @@ function SummaryMetric({ label, value = 0 }) {
 			<div className='mt-1 text-2xl font-semibold'>
 				{Number(value ?? 0).toLocaleString()}
 			</div>
+		</div>
+	);
+}
+
+function WontRenewMetric({ value = 0, breakdown }) {
+	const [expanded, setExpanded] = useState(false);
+
+	const safeBreakdown = {
+		...EMPTY_WONT_RENEW_BREAKDOWN,
+		...(breakdown ?? {}),
+	};
+
+	return (
+		<div className='rounded-md border border-base-300 bg-base-100 px-4 py-3'>
+			<div className='flex items-start justify-between gap-3'>
+				<div>
+					<div className='text-sm opacity-65'>Won&apos;t Renew</div>
+
+					<div className='mt-1 text-2xl font-semibold'>
+						{Number(value ?? 0).toLocaleString()}
+					</div>
+				</div>
+
+				<button
+					type='button'
+					className='btn btn-ghost btn-sm btn-square'
+					aria-label={
+						expanded
+							? "Hide Won't Renew breakdown"
+							: "Show Won't Renew breakdown"
+					}
+					aria-expanded={expanded}
+					onClick={() => setExpanded((current) => !current)}
+				>
+					<span
+						className={`text-lg transition-transform ${
+							expanded ? 'rotate-180' : ''
+						}`}
+						aria-hidden='true'
+					>
+						⌄
+					</span>
+				</button>
+			</div>
+
+			{expanded && (
+				<div className='mt-3 border-t border-base-300 pt-3'>
+					<div className='flex items-center justify-between gap-3 text-sm'>
+						<span className='opacity-65'>Annual</span>
+
+						<span className='font-medium'>
+							{Number(safeBreakdown.annual).toLocaleString()}
+						</span>
+					</div>
+
+					<div className='mt-2 flex items-center justify-between gap-3 text-sm'>
+						<span className='opacity-65'>Monthly</span>
+
+						<span className='font-medium'>
+							{Number(safeBreakdown.monthly).toLocaleString()}
+						</span>
+					</div>
+
+					<div className='mt-2 flex items-center justify-between gap-3 text-sm'>
+						<span className='opacity-65'>Quarterly</span>
+
+						<span className='font-medium'>
+							{Number(safeBreakdown.quarterly).toLocaleString()}
+						</span>
+					</div>
+				</div>
+			)}
 		</div>
 	);
 }
@@ -60,6 +139,10 @@ export default function SubscriptionsSummary({ summary, loading }) {
 	const plans = {
 		...EMPTY_PLANS,
 		...(selectedSummary.plans ?? {}),
+		wontRenewBreakdown: {
+			...EMPTY_WONT_RENEW_BREAKDOWN,
+			...(selectedSummary.plans?.wontRenewBreakdown ?? {}),
+		},
 	};
 
 	const subscriptionTypes = {
@@ -152,14 +235,17 @@ export default function SubscriptionsSummary({ summary, loading }) {
 					</div>
 				</div>
 
-				<div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-5'>
+				<div className='grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-5'>
 					<SummaryMetric label='Annual' value={plans.annual} />
 
 					<SummaryMetric label='Monthly' value={plans.monthly} />
 
 					<SummaryMetric label='Quarterly' value={plans.quarterly} />
 
-					<SummaryMetric label="Won't Renew" value={plans.wontRenew} />
+					<WontRenewMetric
+						value={plans.wontRenew}
+						breakdown={plans.wontRenewBreakdown}
+					/>
 
 					<SummaryMetric label='Total' value={renewalTotal} />
 				</div>

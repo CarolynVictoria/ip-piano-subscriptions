@@ -396,6 +396,45 @@ router.get('/', async (req, res, next) => {
 				CAST(
 					CASE
 						WHEN
+							auto_renew = 0
+							AND normalized_plan LIKE N'%peryear%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS all_wont_renew_annual,
+
+			SUM(
+				CAST(
+					CASE
+						WHEN
+							auto_renew = 0
+							AND normalized_plan LIKE N'%permonth%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS all_wont_renew_monthly,
+
+			SUM(
+				CAST(
+					CASE
+						WHEN
+							auto_renew = 0
+							AND normalized_plan LIKE N'%every3months%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS all_wont_renew_quarterly,
+
+			SUM(
+				CAST(
+					CASE
+						WHEN
 							status_name_in_reports = 'active'
 							AND auto_renew = 1
 							AND normalized_plan LIKE N'%peryear%'
@@ -445,7 +484,49 @@ router.get('/', async (req, res, next) => {
 					END
 					AS BIGINT
 				)
-			) AS active_wont_renew
+			) AS active_wont_renew,
+
+			SUM(
+				CAST(
+					CASE
+						WHEN
+							status_name_in_reports = 'active'
+							AND auto_renew = 0
+							AND normalized_plan LIKE N'%peryear%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS active_wont_renew_annual,
+
+			SUM(
+				CAST(
+					CASE
+						WHEN
+							status_name_in_reports = 'active'
+							AND auto_renew = 0
+							AND normalized_plan LIKE N'%permonth%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS active_wont_renew_monthly,
+
+			SUM(
+				CAST(
+					CASE
+						WHEN
+							status_name_in_reports = 'active'
+							AND auto_renew = 0
+							AND normalized_plan LIKE N'%every3months%'
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS active_wont_renew_quarterly
 
 		FROM payment_subscription_base
 	),
@@ -539,11 +620,17 @@ router.get('/', async (req, res, next) => {
 		r.all_monthly,
 		r.all_quarterly,
 		r.all_wont_renew,
+		r.all_wont_renew_annual,
+		r.all_wont_renew_monthly,
+		r.all_wont_renew_quarterly,
 
 		r.active_annual,
 		r.active_monthly,
 		r.active_quarterly,
 		r.active_wont_renew,
+		r.active_wont_renew_annual,
+		r.active_wont_renew_monthly,
+		r.active_wont_renew_quarterly,
 
 		t.all_single_user,
 		t.all_shared_subscription,
@@ -599,6 +686,14 @@ router.get('/', async (req, res, next) => {
 			quarterly: Number(planSummaryRow.all_quarterly ?? 0),
 
 			wontRenew: Number(planSummaryRow.all_wont_renew ?? 0),
+
+			wontRenewBreakdown: {
+				annual: Number(planSummaryRow.all_wont_renew_annual ?? 0),
+
+				monthly: Number(planSummaryRow.all_wont_renew_monthly ?? 0),
+
+				quarterly: Number(planSummaryRow.all_wont_renew_quarterly ?? 0),
+			},
 		};
 
 		const activePlanSummary = {
@@ -609,6 +704,14 @@ router.get('/', async (req, res, next) => {
 			quarterly: Number(planSummaryRow.active_quarterly ?? 0),
 
 			wontRenew: Number(planSummaryRow.active_wont_renew ?? 0),
+
+			wontRenewBreakdown: {
+				annual: Number(planSummaryRow.active_wont_renew_annual ?? 0),
+
+				monthly: Number(planSummaryRow.active_wont_renew_monthly ?? 0),
+
+				quarterly: Number(planSummaryRow.active_wont_renew_quarterly ?? 0),
+			},
 		};
 
 		const allSubscriptionTypes = {
