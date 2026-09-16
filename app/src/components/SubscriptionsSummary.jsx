@@ -45,16 +45,24 @@ const METRIC_TONES = {
 	error: 'text-error',
 };
 
+const METRIC_SURFACES = {
+	default: 'bg-base-200 border border-transparent shadow-sm',
+	light: 'bg-base-100 border border-base-300 shadow-none',
+};
+
 function SummaryMetric({
 	label,
 	value = 0,
 	tone = 'default',
 	description = '',
+	surface = 'default',
 }) {
 	const toneClass = METRIC_TONES[tone] ?? METRIC_TONES.default;
 
+	const surfaceClass = METRIC_SURFACES[surface] ?? METRIC_SURFACES.default;
+
 	return (
-		<div className='stats w-full bg-base-200 shadow-sm'>
+		<div className={`stats w-full ${surfaceClass}`}>
 			<div className='stat'>
 				<div className='stat-title'>{label}</div>
 
@@ -137,11 +145,37 @@ function WontRenewMetric({ value = 0, breakdown }) {
 }
 
 function statusLabel(value) {
-	if (value === 'completed') {
-		return "completed (won't renew)";
+	if (!value) {
+		return '';
 	}
 
-	return value;
+	let label =
+		value === 'completed'
+			? "completed (won't renew)"
+			: value.replace(/[_-]+/g, ' ');
+
+	return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+function statusTooltip(value) {
+	const tooltips = {
+		active: 'Subscription is currently active.',
+
+		cancelled: 'Subscription was explicitly cancelled.',
+
+		completed:
+			"Subscription has completed and won't renew after the current term.",
+
+		expired:
+			'Subscription ended normally without a successful renewal being expected.',
+
+		expired_with_error:
+			'Subscription expired because renewal failed, typically because of a payment or billing failure.',
+
+		upgraded: 'Subscription was replaced by an upgraded subscription.',
+	};
+
+	return tooltips[value] ?? '';
 }
 
 export default function SubscriptionsSummary({
@@ -242,11 +276,18 @@ export default function SubscriptionsSummary({
 
 				<div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6'>
 					{statuses.map((status) => (
-						<SummaryMetric
+						<div
 							key={status.value}
-							label={statusLabel(status.value)}
-							value={status.count}
-						/>
+							className='tooltip tooltip-top w-full before:bg-base-100 before:text-base-content before:text-xs before:italic before:shadow-sm'
+							data-tip={statusTooltip(status.value)}
+							tabIndex={0}
+						>
+							<SummaryMetric
+								label={statusLabel(status.value)}
+								value={status.count}
+								surface='light'
+							/>
+						</div>
 					))}
 				</div>
 			</div>

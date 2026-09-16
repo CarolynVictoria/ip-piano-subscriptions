@@ -225,11 +225,9 @@ export default function SubscriptionsPage() {
 		<main className='min-h-screen bg-base-200'>
 			<div className='mx-auto max-w-screen-2xl p-6'>
 				<div className='mb-6'>
-					<h1 className='text-3xl font-semibold'>Subscriptions</h1>
-
-					<p className='mt-1 text-sm opacity-70'>
-						Piano subscription data from the current SQL extract.
-					</p>
+					<h1 className='text-3xl font-semibold'>
+						Inside Philanthropy Paywall Subscriptions
+					</h1>
 				</div>
 
 				<SubscriptionsSummary
@@ -258,7 +256,10 @@ export default function SubscriptionsPage() {
 							</label>
 
 							<div className='flex gap-2'>
-								<button type='submit' className='btn btn-primary'>
+								<button
+									type='submit'
+									className='btn border-[#2d6ed8] bg-[#2d6ed8] text-white hover:border-[#245bb3] hover:bg-[#245bb3]'
+								>
 									Search
 								</button>
 
