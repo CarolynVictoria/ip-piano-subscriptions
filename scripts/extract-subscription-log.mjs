@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import sql from 'mssql';
 
 /*
  * Piano VX Subscription Log raw export
@@ -17,7 +18,9 @@ import process from 'node:process';
  *   - saves the returned CSV unchanged
  *   - validates CSV structure and Subscription ID uniqueness
  *   - records headers/counts for comparison with the dashboard export
- *   - performs no SQL loading
+ *   - refreshes dbo.subscription_log_export in Azure SQL
+ *   - truncates and bulk-loads inside one transaction
+ *   - verifies the Azure row count before commit
  */
 
 const REPORT_API_BASE_URL = (
@@ -63,6 +66,25 @@ const CONTROL_HEADERS = [
 	'Modify time',
 ];
 
+const SQL_SERVER = process.env.SQL_SERVER;
+const SQL_PORT = Number(process.env.SQL_PORT || 1433);
+const SQL_USER = process.env.SQL_USER;
+const SQL_PASSWORD = process.env.SQL_PASSWORD;
+const SQL_DATABASE = process.env.SQL_DATABASE;
+
+const SQL_ENCRYPT =
+	String(process.env.SQL_ENCRYPT || 'true').toLowerCase() !== 'false';
+
+const SQL_TRUST_SERVER_CERTIFICATE =
+	String(process.env.SQL_TRUST_SERVER_CERTIFICATE || 'false').toLowerCase() ===
+	'true';
+
+const SQL_BULK_BATCH_SIZE = Number(process.env.SQL_BULK_BATCH_SIZE || 500);
+
+const SQL_TABLE_SCHEMA = 'dbo';
+const SQL_TABLE_NAME = 'subscription_log_export';
+const SQL_FULL_TABLE_NAME = `[${SQL_TABLE_SCHEMA}].[${SQL_TABLE_NAME}]`;
+
 /* =========================================================
    Configuration validation
    ========================================================= */
@@ -94,6 +116,30 @@ if (!Number.isInteger(MAX_RETRIES) || MAX_RETRIES < 0) {
 
 if (!Number.isFinite(REQUEST_TIMEOUT_MS) || REQUEST_TIMEOUT_MS <= 0) {
 	failConfiguration('REQUEST_TIMEOUT_MS must be a positive number');
+}
+
+if (!SQL_SERVER) {
+	failConfiguration('Missing required environment variable: SQL_SERVER');
+}
+
+if (!SQL_USER) {
+	failConfiguration('Missing required environment variable: SQL_USER');
+}
+
+if (!SQL_PASSWORD) {
+	failConfiguration('Missing required environment variable: SQL_PASSWORD');
+}
+
+if (!SQL_DATABASE) {
+	failConfiguration('Missing required environment variable: SQL_DATABASE');
+}
+
+if (!Number.isInteger(SQL_PORT) || SQL_PORT <= 0 || SQL_PORT > 65535) {
+	failConfiguration('SQL_PORT must be an integer between 1 and 65535');
+}
+
+if (!Number.isInteger(SQL_BULK_BATCH_SIZE) || SQL_BULK_BATCH_SIZE <= 0) {
+	failConfiguration('SQL_BULK_BATCH_SIZE must be a positive integer');
 }
 
 /* =========================================================
@@ -406,6 +452,7 @@ function inspectCsv(buffer) {
 	let duplicateSubscriptionIdCount = 0;
 
 	const subscriptionIds = new Set();
+	const dataRows = [];
 
 	const processRow = (completedRow) => {
 		/*
@@ -433,6 +480,7 @@ function inspectCsv(buffer) {
 		}
 
 		dataRowCount += 1;
+		dataRows.push([...completedRow]);
 
 		if (completedRow.length !== headers.length) {
 			mismatchedRowCount += 1;
@@ -523,24 +571,495 @@ function inspectCsv(buffer) {
 	);
 
 	return {
-		column_count: headers.length,
+		inspection: {
+			column_count: headers.length,
 
-		headers,
+			headers,
 
-		data_row_count: dataRowCount,
+			data_row_count: dataRowCount,
 
-		subscription_id_column_present: subscriptionIdIndex >= 0,
+			subscription_id_column_present: subscriptionIdIndex >= 0,
 
-		unique_subscription_id_count: subscriptionIds.size,
+			unique_subscription_id_count: subscriptionIds.size,
 
-		missing_subscription_id_count: missingSubscriptionIdCount,
+			missing_subscription_id_count: missingSubscriptionIdCount,
 
-		duplicate_subscription_id_count: duplicateSubscriptionIdCount,
+			duplicate_subscription_id_count: duplicateSubscriptionIdCount,
 
-		rows_with_column_count_mismatch: mismatchedRowCount,
+			rows_with_column_count_mismatch: mismatchedRowCount,
 
-		control_header_presence: controlHeaderPresence,
+			control_header_presence: controlHeaderPresence,
+		},
+
+		dataRows,
 	};
+}
+
+/* =========================================================
+   Azure SQL refresh
+   ========================================================= */
+
+function sqlConfig() {
+	return {
+		server: SQL_SERVER,
+		port: SQL_PORT,
+		user: SQL_USER,
+		password: SQL_PASSWORD,
+		database: SQL_DATABASE,
+		options: {
+			encrypt: SQL_ENCRYPT,
+			trustServerCertificate: SQL_TRUST_SERVER_CERTIFICATE,
+			useUTC: true,
+		},
+		pool: {
+			max: 5,
+			min: 0,
+			idleTimeoutMillis: 30000,
+		},
+		connectionTimeout: 30000,
+		requestTimeout: 300000,
+	};
+}
+
+async function getSqlTableColumns(pool) {
+	const result = await pool
+		.request()
+		.input('table_schema', sql.NVarChar(128), SQL_TABLE_SCHEMA)
+		.input('table_name', sql.NVarChar(128), SQL_TABLE_NAME).query(`
+			SELECT
+				ORDINAL_POSITION AS ordinal_position,
+				COLUMN_NAME AS column_name,
+				DATA_TYPE AS data_type,
+				CHARACTER_MAXIMUM_LENGTH AS character_maximum_length,
+				IS_NULLABLE AS is_nullable
+			FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE
+				TABLE_SCHEMA = @table_schema
+				AND TABLE_NAME = @table_name
+			ORDER BY ORDINAL_POSITION;
+		`);
+
+	if (result.recordset.length === 0) {
+		throw new Error(`Azure table ${SQL_FULL_TABLE_NAME} does not exist`);
+	}
+
+	return result.recordset;
+}
+
+async function getSqlRowCount(pool) {
+	const result = await pool.request().query(`
+		SELECT COUNT_BIG(*) AS row_count
+		FROM ${SQL_FULL_TABLE_NAME};
+	`);
+
+	return Number(result.recordset[0].row_count);
+}
+
+function normalizedColumnKey(value) {
+	return String(value ?? '')
+		.replace(/^\uFEFF/, '')
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '');
+}
+
+function buildColumnBindings(headers, columns) {
+	const headerIndexes = new Map();
+
+	for (let index = 0; index < headers.length; index += 1) {
+		const header = headers[index];
+		const key = normalizedColumnKey(header);
+
+		if (!key) {
+			throw new Error(`CSV header ${index + 1} is empty`);
+		}
+
+		if (headerIndexes.has(key)) {
+			throw new Error(`CSV contains duplicate normalized header: ${header}`);
+		}
+
+		headerIndexes.set(key, {
+			header,
+			index,
+		});
+	}
+
+	const usedHeaderIndexes = new Set();
+	const bindings = [];
+
+	for (const column of columns) {
+		const key = normalizedColumnKey(column.column_name);
+		const match = headerIndexes.get(key);
+
+		if (!match) {
+			throw new Error(
+				`CSV header could not be matched to Azure column ` +
+					`${column.column_name}`,
+			);
+		}
+
+		usedHeaderIndexes.add(match.index);
+
+		bindings.push({
+			...column,
+			csv_header: match.header,
+			csv_index: match.index,
+		});
+	}
+
+	const unmatchedHeaders = headers.filter(
+		(_header, index) => !usedHeaderIndexes.has(index),
+	);
+
+	if (unmatchedHeaders.length > 0) {
+		throw new Error(
+			`CSV contains header(s) not present in ${SQL_FULL_TABLE_NAME}: ` +
+				unmatchedHeaders.join(', '),
+		);
+	}
+
+	if (headers.length !== columns.length) {
+		throw new Error(
+			`CSV has ${headers.length} columns but ${SQL_FULL_TABLE_NAME} ` +
+				`has ${columns.length}`,
+		);
+	}
+
+	return bindings;
+}
+
+function sqlTypeForColumn(column) {
+	const type = String(column.data_type).toLowerCase();
+	const length =
+		column.character_maximum_length === null
+			? null
+			: Number(column.character_maximum_length);
+
+	switch (type) {
+		case 'nvarchar':
+			return sql.NVarChar(length === -1 ? sql.MAX : length);
+
+		case 'varchar':
+			return sql.VarChar(length === -1 ? sql.MAX : length);
+
+		case 'datetime':
+			return sql.DateTime;
+
+		case 'int':
+			return sql.Int;
+
+		case 'smallint':
+			return sql.SmallInt;
+
+		case 'tinyint':
+			return sql.TinyInt;
+
+		case 'bit':
+			return sql.Bit;
+
+		case 'money':
+			return sql.Money;
+
+		case 'float':
+			return sql.Float;
+
+		default:
+			throw new Error(
+				`Unsupported SQL type ${column.data_type} for column ` +
+					`${column.column_name}`,
+			);
+	}
+}
+
+function makeUtcDate(
+	year,
+	month,
+	day,
+	hour = 0,
+	minute = 0,
+	second = 0,
+	millisecond = 0,
+) {
+	const date = new Date(
+		Date.UTC(year, month - 1, day, hour, minute, second, millisecond),
+	);
+
+	if (
+		date.getUTCFullYear() !== year ||
+		date.getUTCMonth() !== month - 1 ||
+		date.getUTCDate() !== day ||
+		date.getUTCHours() !== hour ||
+		date.getUTCMinutes() !== minute ||
+		date.getUTCSeconds() !== second
+	) {
+		return null;
+	}
+
+	return date;
+}
+
+function parseDateTime(value) {
+	const text = value.trim();
+
+	let match = text.match(
+		/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?(?:Z|[+-]\d{2}:?\d{2})?$/,
+	);
+
+	if (match) {
+		const milliseconds = Number(
+			(match[7] || '').padEnd(3, '0').slice(0, 3) || 0,
+		);
+
+		return makeUtcDate(
+			Number(match[1]),
+			Number(match[2]),
+			Number(match[3]),
+			Number(match[4] || 0),
+			Number(match[5] || 0),
+			Number(match[6] || 0),
+			milliseconds,
+		);
+	}
+
+	match = text.match(
+		/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?$/i,
+	);
+
+	if (match) {
+		let hour = Number(match[4] || 0);
+		const ampm = match[7]?.toUpperCase();
+
+		if (ampm === 'AM' && hour === 12) {
+			hour = 0;
+		} else if (ampm === 'PM' && hour < 12) {
+			hour += 12;
+		}
+
+		return makeUtcDate(
+			Number(match[3]),
+			Number(match[1]),
+			Number(match[2]),
+			hour,
+			Number(match[5] || 0),
+			Number(match[6] || 0),
+			0,
+		);
+	}
+
+	const fallback = new Date(text);
+
+	return Number.isNaN(fallback.getTime()) ? null : fallback;
+}
+
+function parseNumber(value) {
+	const normalized = value.trim().replace(/,/g, '').replace(/^\$/, '');
+	const number = Number(normalized);
+
+	return Number.isFinite(number) ? number : null;
+}
+
+function convertCsvValue(value, column, rowNumber) {
+	if (value === undefined || value === null || value === '') {
+		return null;
+	}
+
+	const type = String(column.data_type).toLowerCase();
+
+	if (type === 'nvarchar' || type === 'varchar') {
+		return value;
+	}
+
+	const trimmed = String(value).trim();
+
+	if (trimmed === '') {
+		return null;
+	}
+
+	if (type === 'datetime') {
+		const date = parseDateTime(trimmed);
+
+		if (!date) {
+			throw new Error(
+				`Invalid datetime in CSV row ${rowNumber}, column ` +
+					`${column.csv_header}: ${trimmed}`,
+			);
+		}
+
+		return date;
+	}
+
+	if (type === 'bit') {
+		const normalized = trimmed.toLowerCase();
+
+		if (normalized === '1' || normalized === 'true' || normalized === 'yes') {
+			return true;
+		}
+
+		if (normalized === '0' || normalized === 'false' || normalized === 'no') {
+			return false;
+		}
+
+		throw new Error(
+			`Invalid bit value in CSV row ${rowNumber}, column ` +
+				`${column.csv_header}: ${trimmed}`,
+		);
+	}
+
+	if (type === 'int' || type === 'smallint' || type === 'tinyint') {
+		const number = parseNumber(trimmed);
+
+		if (number === null || !Number.isInteger(number)) {
+			throw new Error(
+				`Invalid integer in CSV row ${rowNumber}, column ` +
+					`${column.csv_header}: ${trimmed}`,
+			);
+		}
+
+		return number;
+	}
+
+	if (type === 'money' || type === 'float') {
+		const number = parseNumber(trimmed);
+
+		if (number === null) {
+			throw new Error(
+				`Invalid number in CSV row ${rowNumber}, column ` +
+					`${column.csv_header}: ${trimmed}`,
+			);
+		}
+
+		return number;
+	}
+
+	throw new Error(
+		`Unsupported SQL type ${column.data_type} for column ` +
+			`${column.column_name}`,
+	);
+}
+
+function buildBulkTable(bindings, rows, startingDataRowIndex) {
+	const table = new sql.Table(`${SQL_TABLE_SCHEMA}.${SQL_TABLE_NAME}`);
+
+	table.create = false;
+
+	for (const column of bindings) {
+		table.columns.add(column.column_name, sqlTypeForColumn(column), {
+			nullable: column.is_nullable === 'YES',
+		});
+	}
+
+	for (let index = 0; index < rows.length; index += 1) {
+		const row = rows[index];
+		const csvRowNumber = startingDataRowIndex + index + 2;
+
+		table.rows.add(
+			...bindings.map((column) =>
+				convertCsvValue(row[column.csv_index], column, csvRowNumber),
+			),
+		);
+	}
+
+	return table;
+}
+
+async function refreshAzureSubscriptionLog(headers, dataRows) {
+	const pool = new sql.ConnectionPool(sqlConfig());
+	let transaction = null;
+
+	try {
+		console.log('\nConnecting to Azure SQL Database...');
+		await pool.connect();
+
+		const columns = await getSqlTableColumns(pool);
+		const bindings = buildColumnBindings(headers, columns);
+		const rowsBefore = await getSqlRowCount(pool);
+
+		console.log(`Azure table: ${SQL_DATABASE}.${SQL_FULL_TABLE_NAME}`);
+		console.log(`Schema/header columns matched: ${bindings.length}`);
+		console.log(`Rows before refresh: ${rowsBefore.toLocaleString()}`);
+		console.log(`Rows to load: ${dataRows.length.toLocaleString()}`);
+
+		transaction = new sql.Transaction(pool);
+
+		await transaction.begin(sql.ISOLATION_LEVEL.READ_COMMITTED);
+
+		console.log(`Truncating ${SQL_FULL_TABLE_NAME} inside transaction...`);
+
+		await new sql.Request(transaction).query(
+			`TRUNCATE TABLE ${SQL_FULL_TABLE_NAME};`,
+		);
+
+		let inserted = 0;
+
+		for (
+			let offset = 0;
+			offset < dataRows.length;
+			offset += SQL_BULK_BATCH_SIZE
+		) {
+			const batchRows = dataRows.slice(offset, offset + SQL_BULK_BATCH_SIZE);
+
+			const bulkTable = buildBulkTable(bindings, batchRows, offset);
+			const request = new sql.Request(transaction);
+
+			await request.bulk(bulkTable);
+
+			inserted += batchRows.length;
+
+			console.log(
+				`Loaded ${inserted.toLocaleString()} / ` +
+					`${dataRows.length.toLocaleString()} rows...`,
+			);
+		}
+
+		const verification = await new sql.Request(transaction).query(`
+			SELECT COUNT_BIG(*) AS row_count
+			FROM ${SQL_FULL_TABLE_NAME};
+		`);
+
+		const rowsBeforeCommit = Number(verification.recordset[0].row_count);
+
+		if (rowsBeforeCommit !== dataRows.length) {
+			throw new Error(
+				`Azure verification failed before commit: expected ` +
+					`${dataRows.length} rows, found ${rowsBeforeCommit}`,
+			);
+		}
+
+		await transaction.commit();
+		transaction = null;
+
+		const rowsAfter = await getSqlRowCount(pool);
+
+		if (rowsAfter !== dataRows.length) {
+			throw new Error(
+				`Azure verification failed after commit: expected ` +
+					`${dataRows.length} rows, found ${rowsAfter}`,
+			);
+		}
+
+		console.log(`Azure refresh complete: ${rowsAfter.toLocaleString()} rows.`);
+
+		return {
+			table: `${SQL_TABLE_SCHEMA}.${SQL_TABLE_NAME}`,
+			rows_before: rowsBefore,
+			rows_loaded: inserted,
+			rows_after: rowsAfter,
+			bulk_batch_size: SQL_BULK_BATCH_SIZE,
+			complete: true,
+		};
+	} catch (error) {
+		if (transaction) {
+			try {
+				await transaction.rollback();
+				console.error('Azure transaction rolled back.');
+			} catch (rollbackError) {
+				console.error('Azure rollback also failed:', rollbackError);
+			}
+		}
+
+		throw error;
+	} finally {
+		await pool.close().catch(() => {});
+	}
 }
 
 /* =========================================================
@@ -716,7 +1235,7 @@ async function main() {
 		 */
 		await fs.writeFile(csvPath, download.buffer);
 
-		const inspection = inspectCsv(download.buffer);
+		const { inspection, dataRows } = inspectCsv(download.buffer);
 
 		if (!inspection.subscription_id_column_present) {
 			throw new Error(
@@ -729,6 +1248,10 @@ async function main() {
 				`Downloaded CSV has ${inspection.rows_with_column_count_mismatch} ` +
 					'row(s) whose column count differs from the header',
 			);
+		}
+
+		if (inspection.data_row_count === 0) {
+			throw new Error('Downloaded CSV contains no data rows');
 		}
 
 		if (inspection.missing_subscription_id_count !== 0) {
@@ -744,6 +1267,11 @@ async function main() {
 					'duplicate Subscription ID row(s)',
 			);
 		}
+
+		const azureLoad = await refreshAzureSubscriptionLog(
+			inspection.headers,
+			dataRows,
+		);
 
 		const completedAt = new Date();
 
@@ -784,6 +1312,8 @@ async function main() {
 
 			...inspection,
 
+			azure_sql: azureLoad,
+
 			complete: true,
 		};
 
@@ -808,6 +1338,10 @@ async function main() {
 
 			unique_subscription_id_count: inspection.unique_subscription_id_count,
 
+			azure_sql_table: azureLoad.table,
+
+			azure_sql_row_count: azureLoad.rows_after,
+
 			complete: true,
 		};
 
@@ -825,7 +1359,7 @@ async function main() {
 			),
 		]);
 
-		console.log('\nSubscription Log export complete.');
+		console.log('\nSubscription Log export and Azure refresh complete.');
 
 		console.log(`Rows: ${inspection.data_row_count}`);
 
@@ -864,7 +1398,7 @@ async function main() {
 			 */
 		}
 
-		console.error('\nSubscription Log export failed.');
+		console.error('\nSubscription Log export/Azure refresh failed.');
 
 		console.error(error);
 

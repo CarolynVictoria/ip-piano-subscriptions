@@ -1,3 +1,4 @@
+/* ddl_subscription_log_export*/
 IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[subscription_log_export]') AND type in (N'U'))
 DROP TABLE [dbo].[subscription_log_export]
 GO

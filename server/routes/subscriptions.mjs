@@ -314,12 +314,40 @@ router.get('/', async (req, res, next) => {
 		`);
 
 		const planSummaryPromise = pool.request().query(`
-	WITH subscription_plan_counts AS (
+	WITH payment_subscription_base AS (
+		SELECT
+			s.status,
+			s.status_name_in_reports,
+			s.auto_renew,
+			s.shared_account_limit,
+
+			LOWER(
+				REPLACE(
+					COALESCE(s.billing_plan, N''),
+					N' ',
+					N''
+				)
+			) AS normalized_plan
+
+		FROM dbo.subscriptions AS s
+
+		WHERE EXISTS (
+			SELECT 1
+			FROM dbo.terms AS t
+			WHERE
+				t.term_id = s.term_id
+				AND t.type = 'payment'
+		)
+	),
+
+	renewal_counts AS (
 		SELECT
 			SUM(
 				CAST(
 					CASE
-						WHEN p.normalized_plan LIKE N'%peryear%'
+						WHEN
+							auto_renew = 1
+							AND normalized_plan LIKE N'%peryear%'
 						THEN 1
 						ELSE 0
 					END
@@ -330,7 +358,9 @@ router.get('/', async (req, res, next) => {
 			SUM(
 				CAST(
 					CASE
-						WHEN p.normalized_plan LIKE N'%permonth%'
+						WHEN
+							auto_renew = 1
+							AND normalized_plan LIKE N'%permonth%'
 						THEN 1
 						ELSE 0
 					END
@@ -341,7 +371,9 @@ router.get('/', async (req, res, next) => {
 			SUM(
 				CAST(
 					CASE
-						WHEN p.normalized_plan LIKE N'%every3months%'
+						WHEN
+							auto_renew = 1
+							AND normalized_plan LIKE N'%every3months%'
 						THEN 1
 						ELSE 0
 					END
@@ -352,23 +384,21 @@ router.get('/', async (req, res, next) => {
 			SUM(
 				CAST(
 					CASE
-						WHEN
-							p.normalized_plan NOT LIKE N'%peryear%'
-							AND p.normalized_plan NOT LIKE N'%permonth%'
-							AND p.normalized_plan NOT LIKE N'%every3months%'
+						WHEN auto_renew = 0
 						THEN 1
 						ELSE 0
 					END
 					AS BIGINT
 				)
-			) AS all_other,
+			) AS all_wont_renew,
 
 			SUM(
 				CAST(
 					CASE
 						WHEN
-							s.status = 'active'
-							AND p.normalized_plan LIKE N'%peryear%'
+							status_name_in_reports = 'active'
+							AND auto_renew = 1
+							AND normalized_plan LIKE N'%peryear%'
 						THEN 1
 						ELSE 0
 					END
@@ -380,8 +410,9 @@ router.get('/', async (req, res, next) => {
 				CAST(
 					CASE
 						WHEN
-							s.status = 'active'
-							AND p.normalized_plan LIKE N'%permonth%'
+							status_name_in_reports = 'active'
+							AND auto_renew = 1
+							AND normalized_plan LIKE N'%permonth%'
 						THEN 1
 						ELSE 0
 					END
@@ -393,8 +424,9 @@ router.get('/', async (req, res, next) => {
 				CAST(
 					CASE
 						WHEN
-							s.status = 'active'
-							AND p.normalized_plan LIKE N'%every3months%'
+							status_name_in_reports = 'active'
+							AND auto_renew = 1
+							AND normalized_plan LIKE N'%every3months%'
 						THEN 1
 						ELSE 0
 					END
@@ -406,29 +438,69 @@ router.get('/', async (req, res, next) => {
 				CAST(
 					CASE
 						WHEN
-							s.status = 'active'
-							AND p.normalized_plan NOT LIKE N'%peryear%'
-							AND p.normalized_plan NOT LIKE N'%permonth%'
-							AND p.normalized_plan NOT LIKE N'%every3months%'
+							status_name_in_reports = 'active'
+							AND auto_renew = 0
 						THEN 1
 						ELSE 0
 					END
 					AS BIGINT
 				)
-			) AS active_other
+			) AS active_wont_renew
 
-		FROM dbo.subscriptions AS s
+		FROM payment_subscription_base
+	),
 
-		CROSS APPLY (
-			SELECT
-				LOWER(
-					REPLACE(
-						COALESCE(s.billing_plan, N''),
-						N' ',
-						N''
-					)
-				) AS normalized_plan
-		) AS p
+	subscription_type_counts AS (
+		SELECT
+			SUM(
+				CAST(
+					CASE
+						WHEN COALESCE(shared_account_limit, 0) <= 0
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS all_single_user,
+
+			SUM(
+				CAST(
+					CASE
+						WHEN COALESCE(shared_account_limit, 0) > 0
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS all_shared_subscription,
+
+			SUM(
+				CAST(
+					CASE
+						WHEN
+							status_name_in_reports = 'active'
+							AND COALESCE(shared_account_limit, 0) <= 0
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS active_single_user,
+
+			SUM(
+				CAST(
+					CASE
+						WHEN
+							status_name_in_reports = 'active'
+							AND COALESCE(shared_account_limit, 0) > 0
+						THEN 1
+						ELSE 0
+					END
+					AS BIGINT
+				)
+			) AS active_shared_subscription
+
+		FROM payment_subscription_base
 	),
 
 	site_license_counts AS (
@@ -449,24 +521,44 @@ router.get('/', async (req, res, next) => {
 						AND sc.contract_is_active = 1
 				)
 			) AS active_site_licenses
+	),
+
+	access_granted_counts AS (
+		SELECT
+			COUNT_BIG(DISTINCT user_uid) AS access_granted_users
+
+		FROM dbo.access_granted
+
+		WHERE
+			user_uid IS NOT NULL
+			AND LTRIM(RTRIM(user_uid)) <> ''
 	)
 
 	SELECT
-		p.all_annual,
-		p.all_monthly,
-		p.all_quarterly,
-		p.all_other,
+		r.all_annual,
+		r.all_monthly,
+		r.all_quarterly,
+		r.all_wont_renew,
 
-		p.active_annual,
-		p.active_monthly,
-		p.active_quarterly,
-		p.active_other,
+		r.active_annual,
+		r.active_monthly,
+		r.active_quarterly,
+		r.active_wont_renew,
+
+		t.all_single_user,
+		t.all_shared_subscription,
+		t.active_single_user,
+		t.active_shared_subscription,
 
 		l.all_site_licenses,
-		l.active_site_licenses
+		l.active_site_licenses,
 
-	FROM subscription_plan_counts AS p
-	CROSS JOIN site_license_counts AS l;
+		a.access_granted_users
+
+	FROM renewal_counts AS r
+	CROSS JOIN subscription_type_counts AS t
+	CROSS JOIN site_license_counts AS l
+	CROSS JOIN access_granted_counts AS a;
 `);
 
 		const [countResult, dataResult, statusesResult, planSummaryResult] =
@@ -493,8 +585,11 @@ router.get('/', async (req, res, next) => {
 
 		const planSummaryRow = planSummaryResult.recordset[0] ?? {};
 
+		const accessGrantedUsers = Number(planSummaryRow.access_granted_users ?? 0);
+
 		const activeSubscriptionRecords =
-			statusOptions.find((item) => item.value === 'active')?.count ?? 0;
+			Number(planSummaryRow.active_single_user ?? 0) +
+			Number(planSummaryRow.active_shared_subscription ?? 0);
 
 		const allPlanSummary = {
 			annual: Number(planSummaryRow.all_annual ?? 0),
@@ -503,9 +598,7 @@ router.get('/', async (req, res, next) => {
 
 			quarterly: Number(planSummaryRow.all_quarterly ?? 0),
 
-			siteLicenses: Number(planSummaryRow.all_site_licenses ?? 0),
-
-			other: Number(planSummaryRow.all_other ?? 0),
+			wontRenew: Number(planSummaryRow.all_wont_renew ?? 0),
 		};
 
 		const activePlanSummary = {
@@ -515,9 +608,29 @@ router.get('/', async (req, res, next) => {
 
 			quarterly: Number(planSummaryRow.active_quarterly ?? 0),
 
-			siteLicenses: Number(planSummaryRow.active_site_licenses ?? 0),
+			wontRenew: Number(planSummaryRow.active_wont_renew ?? 0),
+		};
 
-			other: Number(planSummaryRow.active_other ?? 0),
+		const allSubscriptionTypes = {
+			singleUser: Number(planSummaryRow.all_single_user ?? 0),
+
+			sharedSubscription: Number(planSummaryRow.all_shared_subscription ?? 0),
+
+			siteLicense: Number(planSummaryRow.all_site_licenses ?? 0),
+
+			accessGranted: accessGrantedUsers,
+		};
+
+		const activeSubscriptionTypes = {
+			singleUser: Number(planSummaryRow.active_single_user ?? 0),
+
+			sharedSubscription: Number(
+				planSummaryRow.active_shared_subscription ?? 0,
+			),
+
+			siteLicense: Number(planSummaryRow.active_site_licenses ?? 0),
+
+			accessGranted: accessGrantedUsers,
 		};
 
 		return res.json({
@@ -530,6 +643,7 @@ router.get('/', async (req, res, next) => {
 					totalSubscriptionRecords,
 					statuses: statusOptions,
 					plans: allPlanSummary,
+					subscriptionTypes: allSubscriptionTypes,
 				},
 
 				active: {
@@ -538,6 +652,7 @@ router.get('/', async (req, res, next) => {
 					statuses: statusOptions.filter((item) => item.value === 'active'),
 
 					plans: activePlanSummary,
+					subscriptionTypes: activeSubscriptionTypes,
 				},
 			},
 

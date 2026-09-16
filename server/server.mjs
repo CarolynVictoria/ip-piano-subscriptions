@@ -5,6 +5,7 @@ import express from 'express';
 import { closePool, getPool } from './db.mjs';
 
 import subscriptionsRouter from './routes/subscriptions.mjs';
+import accessGrantedRouter from './routes/access-granted.mjs';
 
 const app = express();
 
@@ -64,6 +65,12 @@ app.get('/api/status', async (_req, res) => {
    ========================================================= */
 
 app.use('/api/subscriptions', subscriptionsRouter);
+
+/* =========================================================
+   Access Granted API
+   ========================================================= */
+
+app.use('/api/access-granted', accessGrantedRouter);
 
 /* =========================================================
    API error handler

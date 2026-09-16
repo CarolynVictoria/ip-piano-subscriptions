@@ -4,43 +4,80 @@ const EMPTY_PLANS = {
 	annual: 0,
 	monthly: 0,
 	quarterly: 0,
-	siteLicenses: 0,
-	other: 0,
+	wontRenew: 0,
 };
 
-function SummaryMetric({ label, value }) {
+const EMPTY_SUBSCRIPTION_TYPES = {
+	singleUser: 0,
+	sharedSubscription: 0,
+	siteLicense: 0,
+	accessGranted: 0,
+};
+
+function SummaryMetric({ label, value = 0 }) {
 	return (
 		<div className='rounded-md border border-base-300 bg-base-100 px-4 py-3'>
 			<div className='text-sm opacity-65'>{label}</div>
 
 			<div className='mt-1 text-2xl font-semibold'>
-				{value.toLocaleString()}
+				{Number(value ?? 0).toLocaleString()}
 			</div>
 		</div>
 	);
 }
 
+function statusLabel(value) {
+	if (value === 'completed') {
+		return "completed (won't renew)";
+	}
+
+	return value;
+}
+
 export default function SubscriptionsSummary({ summary, loading }) {
 	const [planView, setPlanView] = useState('active');
 
-	const allSummary = summary?.all ?? {
+	const allSummary = {
 		totalSubscriptionRecords: 0,
 		statuses: [],
 		plans: EMPTY_PLANS,
+		subscriptionTypes: EMPTY_SUBSCRIPTION_TYPES,
+		...(summary?.all ?? {}),
 	};
 
-	const activeSummary = summary?.active ?? {
+	const activeSummary = {
 		totalSubscriptionRecords: 0,
 		statuses: [],
 		plans: EMPTY_PLANS,
+		subscriptionTypes: EMPTY_SUBSCRIPTION_TYPES,
+		...(summary?.active ?? {}),
 	};
 
 	const statuses = allSummary.statuses ?? [];
 
-	const plans =
-		planView === 'active'
-			? (activeSummary.plans ?? EMPTY_PLANS)
-			: (allSummary.plans ?? EMPTY_PLANS);
+	const selectedSummary = planView === 'active' ? activeSummary : allSummary;
+
+	const plans = {
+		...EMPTY_PLANS,
+		...(selectedSummary.plans ?? {}),
+	};
+
+	const subscriptionTypes = {
+		...EMPTY_SUBSCRIPTION_TYPES,
+		...(selectedSummary.subscriptionTypes ?? {}),
+	};
+
+	const renewalTotal =
+		Number(plans.annual ?? 0) +
+		Number(plans.monthly ?? 0) +
+		Number(plans.quarterly ?? 0) +
+		Number(plans.wontRenew ?? 0);
+
+	const subscriptionTypeTotal =
+		Number(subscriptionTypes.singleUser ?? 0) +
+		Number(subscriptionTypes.sharedSubscription ?? 0) +
+		Number(subscriptionTypes.siteLicense ?? 0) +
+		Number(subscriptionTypes.accessGranted ?? 0);
 
 	return (
 		<section className='mb-4 rounded-lg bg-base-100 p-4 shadow-sm'>
@@ -59,21 +96,27 @@ export default function SubscriptionsSummary({ summary, loading }) {
 					<div className='text-xl font-semibold'>
 						{loading
 							? '—'
-							: allSummary.totalSubscriptionRecords.toLocaleString()}
+							: Number(
+									allSummary.totalSubscriptionRecords ?? 0,
+								).toLocaleString()}
 					</div>
 				</div>
 			</div>
 
 			<div>
-				<h3 className='mb-2 text-sm font-semibold uppercase tracking-wide opacity-60'>
-					Status
-				</h3>
+				<div className='mb-2'>
+					<h3 className='text-sm font-semibold uppercase tracking-wide opacity-60'>
+						Status
+					</h3>
+
+					<p className='mt-1 text-sm opacity-65'>API Realtime Statistics</p>
+				</div>
 
 				<div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6'>
 					{statuses.map((status) => (
 						<SummaryMetric
 							key={status.value}
-							label={status.value}
+							label={statusLabel(status.value)}
 							value={status.count}
 						/>
 					))}
@@ -83,7 +126,7 @@ export default function SubscriptionsSummary({ summary, loading }) {
 			<div className='mt-5'>
 				<div className='mb-2 flex items-center justify-between gap-4'>
 					<h3 className='text-sm font-semibold uppercase tracking-wide opacity-60'>
-						Plan Type
+						Renewal Type
 					</h3>
 
 					<div className='join'>
@@ -109,18 +152,46 @@ export default function SubscriptionsSummary({ summary, loading }) {
 					</div>
 				</div>
 
-				<div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5'>
+				<div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-5'>
 					<SummaryMetric label='Annual' value={plans.annual} />
 
 					<SummaryMetric label='Monthly' value={plans.monthly} />
 
 					<SummaryMetric label='Quarterly' value={plans.quarterly} />
 
-					<SummaryMetric label='Site Licenses' value={plans.siteLicenses} />
+					<SummaryMetric label="Won't Renew" value={plans.wontRenew} />
 
-					{plans.other > 0 && (
-						<SummaryMetric label='Other' value={plans.other} />
-					)}
+					<SummaryMetric label='Total' value={renewalTotal} />
+				</div>
+			</div>
+
+			<div className='mt-5'>
+				<h3 className='mb-2 text-sm font-semibold uppercase tracking-wide opacity-60'>
+					Subscription Type
+				</h3>
+
+				<div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-5'>
+					<SummaryMetric
+						label='Single User'
+						value={subscriptionTypes.singleUser}
+					/>
+
+					<SummaryMetric
+						label='Shared Subscription'
+						value={subscriptionTypes.sharedSubscription}
+					/>
+
+					<SummaryMetric
+						label='Site License'
+						value={subscriptionTypes.siteLicense}
+					/>
+
+					<SummaryMetric
+						label='Access Granted'
+						value={subscriptionTypes.accessGranted}
+					/>
+
+					<SummaryMetric label='Total' value={subscriptionTypeTotal} />
 				</div>
 			</div>
 		</section>

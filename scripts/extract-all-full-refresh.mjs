@@ -21,6 +21,14 @@ const STEPS = [
 		name: 'Subscriptions',
 		script: 'extract-subscriptions.mjs',
 	},
+	{
+		name: 'Subscription Log export',
+		script: 'extract-subscription-log.mjs',
+	},
+	{
+		name: 'Access Granted',
+		script: 'extract-access-granted.mjs',
+	},
 ];
 
 function formatDuration(milliseconds) {
